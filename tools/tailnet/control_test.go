@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -19,6 +20,23 @@ import (
 	"tailscale.com/tstest/integration/testcontrol"
 	"tailscale.com/types/logger"
 )
+
+// TestMain gives the whole package a throwaway home. Switching servers,
+// disconnecting and status refreshes call writeSSHConfig, which prepends an
+// Include line to ~/.ssh/config; tests must never edit the developer's real
+// file. Windows resolves the home from USERPROFILE, so HOME alone is not enough.
+func TestMain(m *testing.M) {
+	home, err := os.MkdirTemp("", "cage-tailnet-test-home-")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	os.Setenv("HOME", home)
+	os.Setenv("USERPROFILE", home)
+	code := m.Run()
+	os.RemoveAll(home)
+	os.Exit(code)
+}
 
 var controlURLVectors = []struct {
 	in  string
@@ -255,6 +273,38 @@ func TestPersistedNullAndNonStringControlURLDoesNotStart(t *testing.T) {
 		}
 		if strings.Contains(strings.Join(st.Health, "\n"), "已保存的控制服务器地址无效") {
 			t.Fatal(st.Health)
+		}
+	}
+}
+
+// A request without control_url (an older stdio client) still saves
+// settings.json. The rejected address must survive that save; writing it back as
+// missing or "" would make the next start quietly use the official service.
+func TestRejectedPersistedControlURLSurvivesOtherSaves(t *testing.T) {
+	for _, tc := range []struct{ body, reported string }{
+		{`{"enabled":true,"keys":["ssh-ed25519 AAAA"],"control_url":null}`, nonStringControlURLMarker},
+		{`{"enabled":true,"keys":["ssh-ed25519 AAAA"],"control_url":"http://hs.example.com"}`, "http://hs.example.com"},
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(tc.body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		n, err := newNode(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := n.run(context.Background(), request{Action: "disconnect"}); err != nil {
+			t.Fatal(err)
+		}
+		n, err = newNode(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n.config.Enabled || n.config.ControlURL != tc.reported || !n.invalidControl || len(n.config.Keys) != 1 {
+			t.Fatalf("%s: %+v invalid=%v", tc.body, n.config, n.invalidControl)
+		}
+		if err := n.start(); err == nil || n.server != nil {
+			t.Fatalf("%s: started after save: server=%v err=%v", tc.body, n.server, err)
 		}
 	}
 }
