@@ -295,6 +295,7 @@ func jsonRaw(v any) json.RawMessage {
 	return b
 }
 
+// shapeTailnetState 只应由 replyTailnetState 调用。
 func shapeTailnetState(result map[string]json.RawMessage, desired, class, applied string) map[string]json.RawMessage {
 	status := deriveControlURLStatus(class, desired, applied)
 	if status != "ok" {
@@ -317,26 +318,14 @@ func shapeTailnetState(result map[string]json.RawMessage, desired, class, applie
 	return result
 }
 
+// writeTailnetState 只应由 replyTailnetState 调用。
 func writeTailnetState(w http.ResponseWriter, result map[string]json.RawMessage) {
 	w.Header().Set("Content-Type", "application/json")
 	b, _ := json.Marshal(result)
 	_, _ = w.Write(b)
 }
 
-func (s *Server) finishTailnet(w http.ResponseWriter, data []byte, err error, desired string) {
-	if err != nil {
-		http.Error(w, "Tailscale 操作未完成。请更新环境组件后重试；原设备身份和 SSH 公钥会保留。", 502)
-		return
-	}
-	result, err := decodeTailnetState(data)
-	if err != nil {
-		http.Error(w, err.Error(), 502)
-		return
-	}
-	if reason := tailnetErrorMessage(result); reason != "" {
-		http.Error(w, reason, 502)
-		return
-	}
+func (s *Server) replyTailnetState(w http.ResponseWriter, result map[string]json.RawMessage, desired string) {
 	class, applied := classifyTailnetBridge(result)
 	status := deriveControlURLStatus(class, desired, applied)
 	var authURL string
@@ -353,6 +342,23 @@ func (s *Server) finishTailnet(w http.ResponseWriter, data []byte, err error, de
 		}
 	}
 	writeTailnetState(w, shapeTailnetState(result, desired, class, applied))
+}
+
+func (s *Server) finishTailnet(w http.ResponseWriter, data []byte, err error, desired string) {
+	if err != nil {
+		http.Error(w, "Tailscale 操作未完成。请更新环境组件后重试；原设备身份和 SSH 公钥会保留。", 502)
+		return
+	}
+	result, err := decodeTailnetState(data)
+	if err != nil {
+		http.Error(w, err.Error(), 502)
+		return
+	}
+	if reason := tailnetErrorMessage(result); reason != "" {
+		http.Error(w, reason, 502)
+		return
+	}
+	s.replyTailnetState(w, result, desired)
 }
 
 func (s *Server) handleTailnetAction(w http.ResponseWriter, r *http.Request, action, key, host string, port int) {
@@ -434,7 +440,7 @@ func (s *Server) handleControlServer(w http.ResponseWriter, r *http.Request, nex
 				http.Error(w, "保存控制服务器失败，请重试", 500)
 				return
 			}
-			writeTailnetState(w, shapeTailnetState(result, next, class, applied))
+			s.replyTailnetState(w, result, next)
 			return
 		case bridgeLegacy:
 			if next != "" {
@@ -445,7 +451,7 @@ func (s *Server) handleControlServer(w http.ResponseWriter, r *http.Request, nex
 				http.Error(w, "保存控制服务器失败，请重试", 500)
 				return
 			}
-			writeTailnetState(w, shapeTailnetState(result, next, class, applied))
+			s.replyTailnetState(w, result, next)
 			return
 		case bridgeStranded:
 			if next != applied {
@@ -456,7 +462,7 @@ func (s *Server) handleControlServer(w http.ResponseWriter, r *http.Request, nex
 				http.Error(w, "保存控制服务器失败，请重试", 500)
 				return
 			}
-			writeTailnetState(w, shapeTailnetState(result, next, class, applied))
+			s.replyTailnetState(w, result, next)
 			return
 		}
 		body := map[string]string{"action": "control-server", "control_url": next}
@@ -500,7 +506,6 @@ func (s *Server) handleControlServer(w http.ResponseWriter, r *http.Request, nex
 			tailnetControlError(w, 500, tailnetControlRestored, "保存控制服务器失败，已恢复原设置。")
 			return
 		}
-		class, applied = classifyTailnetBridge(result)
-		writeTailnetState(w, shapeTailnetState(result, next, class, applied))
+		s.replyTailnetState(w, result, next)
 	})
 }

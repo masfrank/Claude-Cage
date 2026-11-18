@@ -726,3 +726,82 @@ func TestTailnetControlServerTimeout(t *testing.T) {
 		t.Fatal(w.Code, w.Header().Get("X-Cage-Recovery"), w.Body.String())
 	}
 }
+
+func TestTailnetControlServerAuthURL(t *testing.T) {
+	t.Run("supportedCustomForeign", func(t *testing.T) {
+		s := readyTailnet(t)
+		g := &recordedGuest{fn: func(req map[string]any, n int) any {
+			if req["action"] == "control-server" {
+				return supportedState(map[string]any{"control_url": "https://hs.example.com", "backend": "NeedsLogin", "auth_url": "https://evil.test/register/x"})
+			}
+			return supportedState(nil)
+		}}
+		g.attach(t, s)
+		w := request(s, "POST", "/api/tailscale/control-server", s.origin, `{"control_url":"https://hs.example.com"}`, true)
+		if w.Code != 502 || w.Header().Get("X-Cage-Recovery") != tailnetAuthURLInvalid {
+			t.Fatal(w.Code, w.Header().Get("X-Cage-Recovery"), w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "evil.test") {
+			t.Fatal(w.Body.String())
+		}
+	})
+	t.Run("supportedCustomHomologous", func(t *testing.T) {
+		s := readyTailnet(t)
+		g := &recordedGuest{fn: func(req map[string]any, n int) any {
+			if req["action"] == "control-server" {
+				return supportedState(map[string]any{"control_url": "https://hs.example.com", "backend": "NeedsLogin", "auth_url": "https://hs.example.com/register/x"})
+			}
+			return supportedState(nil)
+		}}
+		g.attach(t, s)
+		w := request(s, "POST", "/api/tailscale/control-server", s.origin, `{"control_url":"https://hs.example.com"}`, true)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "https://hs.example.com/register/x") {
+			t.Fatal(w.Code, w.Body.String())
+		}
+	})
+	t.Run("supportedOfficialForeign", func(t *testing.T) {
+		s := readyTailnet(t)
+		g := &recordedGuest{fn: func(req map[string]any, n int) any {
+			if req["action"] == "control-server" {
+				return supportedState(map[string]any{"control_url": "", "backend": "NeedsLogin", "auth_url": "https://evil.test/a/x"})
+			}
+			return supportedState(nil)
+		}}
+		g.attach(t, s)
+		w := request(s, "POST", "/api/tailscale/control-server", s.origin, `{"control_url":""}`, true)
+		if w.Code != 502 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "evil.test") {
+			t.Fatal(w.Body.String())
+		}
+	})
+	t.Run("legacyOfficialForeign", func(t *testing.T) {
+		s := readyTailnet(t)
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return map[string]any{"installed": true, "backend": "NeedsLogin", "auth_url": "https://evil.test/a/x"}
+		}}
+		g.attach(t, s)
+		w := request(s, "POST", "/api/tailscale/control-server", s.origin, `{"control_url":""}`, true)
+		if w.Code != 502 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "evil.test") {
+			t.Fatal(w.Body.String())
+		}
+	})
+	t.Run("strandedCustomForeign", func(t *testing.T) {
+		s := readyTailnet(t)
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return map[string]any{"installed": true, "backend": "NeedsLogin", "control_url": "https://hs.example.com", "auth_url": "https://evil.test/register/x"}
+		}}
+		g.attach(t, s)
+		w := request(s, "POST", "/api/tailscale/control-server", s.origin, `{"control_url":"https://hs.example.com"}`, true)
+		if w.Code != 502 || w.Header().Get("X-Cage-Recovery") != tailnetAuthURLInvalid {
+			t.Fatal(w.Code, w.Header().Get("X-Cage-Recovery"), w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "evil.test") {
+			t.Fatal(w.Body.String())
+		}
+	})
+}
