@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/sylvinus/agent-vm/internal/transfermeta"
 )
 
 const maxImageBytes = 20 << 20
@@ -163,7 +165,7 @@ func validateInputImage(data []byte) ([]byte, error) {
 	if _, err := png.Decode(bytes.NewReader(data)); err != nil {
 		return nil, errors.New("图片已损坏，请重新复制或选择图片")
 	}
-	return data, nil
+	return transfermeta.SanitizeBytes("image.png", data)
 }
 
 func (s *Server) imageInput(w http.ResponseWriter, r *http.Request) {
@@ -214,7 +216,7 @@ func (s *Server) imageInput(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		body, _ := json.Marshal(map[string]string{"id": input.ID, "png": input.PNG, "transfer": input.Transfer})
+		body, _ := json.Marshal(map[string]string{"id": input.ID, "png": base64.StdEncoding.EncodeToString(data), "transfer": input.Transfer})
 		if _, err = s.guestAPI(ctx, token, "POST", "/paste-image", body); err != nil {
 			http.Error(w, "图片未能粘贴，请点击支持图片的输入框后重试；环境组件过旧时请先更新环境", 502)
 			return

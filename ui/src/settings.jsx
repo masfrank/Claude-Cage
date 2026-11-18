@@ -534,6 +534,14 @@ export function SettingsPanel({
                   <input type="checkbox" role="switch" checked={draft.project_file_cache}
                     onChange={(event) => update("project_file_cache", event.target.checked)} />
                 </label>}
+                <label className="toggle-row">
+                  <span>
+                    <strong>允许未支持格式原样传递</strong>
+                    <small>支持的格式始终自动清理。开启后，无法安全清理的照片和音视频可通过上传和文件剪贴板原样传递，可能保留 GPS 定位、时区和地区元数据。保存后对新的传递生效；共享项目目录始终按原文件读写。</small>
+                  </span>
+                  <input type="checkbox" role="switch" checked={Boolean(draft.transfer_allow_unclean)}
+                    onChange={(event) => update("transfer_allow_unclean", event.target.checked)} />
+                </label>
                 <h4>键盘习惯</h4>
                 <div className="choice-list">
                   {[

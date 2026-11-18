@@ -2,6 +2,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ArrowLeft, Maximize, ZoomIn } from "lucide-react";
 import { api } from "./api";
+import { pollLoginFrames } from "./macos-login-frames.mjs";
 import "./macos-login.css";
 
 // DOM physical codes and the matching ANSI key codes expected by the Apple VM keyboard.
@@ -97,6 +98,7 @@ export function MacOSLogin({ disabled, initialSetup = false, installRecovery = f
   const [aspect, setAspect] = useState(guestWidth / guestHeight);
   const lease = useRef(null);
   const chain = useRef(Promise.resolve());
+  const refreshFrame = useRef(null);
   const stage = useRef(null);
   const keyboard = useRef(null);
   const imageRef = useRef(null);
@@ -215,12 +217,11 @@ export function MacOSLogin({ disabled, initialSetup = false, installRecovery = f
 
   useEffect(() => {
     if (!session) return;
-    let timer;
-    let alive = true;
-    const poll = async () => {
-      try {
-        const r = await api(endpoint, { action: "frame", session, ...scope });
-        if (!alive || lease.current?.session !== session) return;
+    const polling = pollLoginFrames({
+      capture: () => api(endpoint, { action: "frame", session, ...scope }),
+      inputPending: () => Boolean(lease.current?.pendingInputs),
+      onFrame(r) {
+        if (lease.current?.session !== session) return;
         if (r.closed) { setRecovery(r.recovery || ""); end(r.error || ""); onSessionClosed?.(); return; }
         if (r.image) {
           if (maintenance && (!r.geometry || !Array.isArray(r.region) || r.region.length !== 4 || !r.region.every(Number.isInteger)))
@@ -230,13 +231,11 @@ export function MacOSLogin({ disabled, initialSetup = false, installRecovery = f
           setFrameError("");
         }
         if (r.error) setFrameError(r.error);
-        timer = setTimeout(poll, 550);
-      } catch (e) {
-        if (alive && lease.current?.session === session) end(e.message);
-      }
-    };
-    poll();
-    return () => { alive = false; clearTimeout(timer); };
+      },
+      onError(e) { if (lease.current?.session === session) end(e.message); },
+    });
+    refreshFrame.current = polling.refresh;
+    return () => { refreshFrame.current = null; polling.stop(); };
   }, [session]);
 
   function enqueue(action, data) {
@@ -244,13 +243,17 @@ export function MacOSLogin({ disabled, initialSetup = false, installRecovery = f
     if (!owner?.session) return;
     const geometry = shown.current.geometry;
     if (maintenance && !geometry) { setMessage("请等待授权窗口画面后再操作"); return; }
+    owner.pendingInputs = (owner.pendingInputs || 0) + 1;
     chain.current = chain.current.then(async () => {
       if (lease.current !== owner) return;
       const r = await api(endpoint, { action, session: owner.session, ...scope, ...(maintenance ? { geometry } : {}), ...data });
       if (lease.current !== owner) return;
       if (r.closed) { end(r.error || ""); onSessionClosed?.(); }
       else setMessage(r.error || "");
-    }).catch((e) => { if (lease.current === owner) end(e.message); });
+    }).catch((e) => { if (lease.current === owner) end(e.message); }).finally(() => {
+      owner.pendingInputs--;
+      if (!owner.pendingInputs && lease.current === owner) refreshFrame.current?.();
+    });
   }
 
   function sendClick(e) {

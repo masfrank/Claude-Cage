@@ -64,7 +64,7 @@ const canonical = new URL(pathFor(locale), Astro.site);
 <body>
   <header class="nav wrap">
     <a class="brand" href={pathFor(locale)} aria-label={c.home}><img src={`${base}cage-icon.png`} width="40" height="40" alt="" /><span>Claude Cage</span></a>
-    <nav><a class="nav-guide" href={`${base}docs/`}>{guideLabel}</a><a href="#how">{c.start}</a><a href={repo}>GitHub ↗</a><a class="nav-download" href="#download" data-download-open aria-haspopup="dialog">{c.downloadLabel} ↓</a></nav>
+    <nav><a href={base+"ask/"} lang="zh-CN">使用答疑</a><a class="nav-guide" href={`${base}docs/`}>{guideLabel}</a><a href="#how">{c.start}</a><a href={repo}>GitHub ↗</a><a class="nav-download" href="#download" data-download-open aria-haspopup="dialog">{c.downloadLabel} ↓</a></nav>
   </header>
   <div class="language-switch wrap">
     <span id="language-label">{c.languageLabel}</span>
@@ -80,7 +80,7 @@ const canonical = new URL(pathFor(locale), Astro.site);
   </div>
   <main id="main">
     <section class="story-hero wrap">
-      <div class="story-copy"><span class="eyebrow"><span class="seed"></span>CLAUDE CAGE · v{published.version}</span><h1>{c.hero}{c.heroAccent && <><br /><em>{c.heroAccent}</em></>}</h1><p class="tagline">{c.tagline}</p><p class="hero-intro">{c.intro}</p><a class="button" href="#download" data-download-open aria-haspopup="dialog">{c.downloadLabel} ↓</a><span class="requirements" dir="ltr">{c.requirements}</span></div>
+      <div class="story-copy"><span class="eyebrow"><span class="seed"></span>CLAUDE CAGE · v{published.version}</span><h1>{c.hero}{c.heroAccent && <><br /><em>{c.heroAccent}</em></>}</h1><p class="tagline">{c.tagline}</p><p class="hero-intro">{c.intro}</p><a class="button" href="#download" data-download-open aria-haspopup="dialog">{c.downloadLabel} ↓</a><a class="text-link ask-link" lang="zh-CN" href={base+"ask/"}>使用答疑 →</a><span class="requirements" dir="ltr">{c.requirements}</span></div>
       <figure class="character"><img src={art.src} width={art.width} height={art.height} alt={c.artAlt} fetchpriority="high" /></figure>
     </section>
     <section class="manifesto wrap"><h2>{c.why}</h2><p>{c.whyText}</p><ul class="key-features">{c.keyFeatures.map(text => <li>{text}</li>)}</ul><p class="small-note">{c.whyNote}</p></section>
@@ -145,3 +145,5 @@ const canonical = new URL(pathFor(locale), Astro.site);
   </script>
 </body>
 </html>
+
+<style>.ask-link{display:inline-block;margin-inline-start:18px}</style>

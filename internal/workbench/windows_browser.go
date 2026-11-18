@@ -242,7 +242,7 @@ type windowsBrowserEventStream struct {
 
 func (s *windowsBrowserEventStream) Close() error { s.cancel(); return s.ReadCloser.Close() }
 
-func (s *Server) nativeBrowserFile(w http.ResponseWriter, r *http.Request, method, path string, body io.Reader) {
+func (s *Server) nativeBrowserFile(w http.ResponseWriter, r *http.Request, method, path string, body io.Reader, length int64) {
 	request, err := url.Parse(path)
 	if err != nil {
 		http.Error(w, "浏览器文件操作无效", 400)
@@ -250,7 +250,7 @@ func (s *Server) nativeBrowserFile(w http.ResponseWriter, r *http.Request, metho
 	}
 	query := request.Query()
 	if method == "POST" && request.Path == "/upload-file" {
-		result, err := s.nativeBrowserClient().upload(r.Context(), query.Get("id"), query.Get("name"), body, r.ContentLength)
+		result, err := s.nativeBrowserClient().upload(r.Context(), query.Get("id"), query.Get("name"), body, length)
 		if err != nil {
 			http.Error(w, err.Error(), 502)
 			return

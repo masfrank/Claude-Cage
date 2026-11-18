@@ -18,6 +18,7 @@ import (
 	"al.essio.dev/pkg/shellescape"
 	"github.com/sylvinus/agent-vm/internal/cage"
 	"github.com/sylvinus/agent-vm/internal/diagnostics"
+	"github.com/sylvinus/agent-vm/internal/transfermeta"
 	"github.com/sylvinus/agent-vm/internal/usererror"
 )
 
@@ -449,7 +450,16 @@ func (s *Server) fileInputUpload(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
 	r.Body = http.MaxBytesReader(w, r.Body, browserFileLimit)
-	result, err := s.guestFiles(ctx, target, "POST", "/upload?"+url.Values{"id": {id}, "name": {name}}.Encode(), r.Body, name)
+	prepared, err := transfermeta.Prepare(name, r.Body, r.ContentLength, s.transferOptions())
+	if err != nil {
+		transferMetadataError(w, err)
+		return
+	}
+	defer prepared.Close()
+	if prepared.Unclean {
+		w.Header().Set("X-Cage-Metadata-Warning", "metadata-may-remain")
+	}
+	result, err := s.guestFiles(ctx, target, "POST", "/upload?"+url.Values{"id": {id}, "name": {name}}.Encode(), prepared.Body, name)
 	if err != nil {
 		requestError(w, err)
 		return
