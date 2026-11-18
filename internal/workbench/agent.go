@@ -117,10 +117,13 @@ func AgentOperations() []AgentOperation {
 	post("mobile.pair", "Generate the same phone pairing invitation", "/api/mobile-pair", object(map[string]string{"admin": "string", "relay": "string"}))
 	add("mobile.remove", "Remove the same paired device", "DELETE", "/api/mobile-pair", object(nil))
 	get("tailscale.get", "Read guest private-network state", "/api/tailscale")
-	for _, action := range []string{"install", "connect", "login", "disconnect", "logout", "add-key", "remove-key"} {
+	for _, action := range []string{"install", "connect", "login", "disconnect", "logout", "add-key", "remove-key", "control-server"} {
 		schema := object(nil)
 		if action == "add-key" || action == "remove-key" {
 			schema = object(map[string]string{"key": "string"})
+		}
+		if action == "control-server" {
+			schema = object(map[string]string{"control_url": "string"})
 		}
 		post("tailscale."+action, "Run the same Tailscale action as the workbench", "/api/tailscale/"+action, schema)
 	}

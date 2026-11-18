@@ -97,6 +97,7 @@ type Server struct {
 	nativeDownloadRevision                           uint64
 	windowsNetwork                                   *windowsHostNetwork
 	op                                               sync.Mutex
+	tailnetMu                                        sync.Mutex
 	profile, configPath, exe, origin, token, session string
 	mu                                               sync.Mutex
 	preferences                                      Preferences

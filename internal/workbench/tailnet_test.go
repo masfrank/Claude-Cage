@@ -57,7 +57,7 @@ func TestTailnetGuestContract(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]string{"tailnet_error": "请粘贴一条有效的 SSH 公钥"})
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"installed": true, "backend": "NeedsLogin", "auth_url": "https://login.tailscale.com/a/test"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"installed": true, "backend": "NeedsLogin", "auth_url": "https://login.tailscale.com/a/test", "control_url": "", "capabilities": []string{"control-url"}})
 	}))
 	defer guest.Close()
 	s.browserControl = localBrowserClient(t, s.lifetimeContext(), guest)
@@ -82,10 +82,14 @@ func TestTailnetServicePortContract(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 			t.Error(err)
 		}
+		if input.Action == "status" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"installed": true, "backend": "Running", "control_url": "", "capabilities": []string{"control-url"}, "forwards": []any{}})
+			return
+		}
 		if input.Action != "open-service" || input.Host != "100.88.2.4" || input.Port != 8080 {
 			t.Errorf("wrong service input: %+v", input)
 		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"installed": true, "backend": "Running", "forwards": []map[string]any{{"host": input.Host, "port": input.Port, "address": "127.0.0.1:32123"}}})
+		_ = json.NewEncoder(w).Encode(map[string]any{"installed": true, "backend": "Running", "control_url": "", "capabilities": []string{"control-url"}, "forwards": []map[string]any{{"host": input.Host, "port": input.Port, "address": "127.0.0.1:32123"}}})
 	}))
 	defer guest.Close()
 	s.browserControl = localBrowserClient(t, s.lifetimeContext(), guest)
