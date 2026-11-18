@@ -20,6 +20,7 @@ const normalizeControlInput = value => {
     return `${url.protocol}//${host}${port}`;
   } catch { return next.toLowerCase(); }
 };
+const unreadableMessage = "Tailscale 控制服务器设置无法读取，请重新保存控制服务器。";
 
 export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, onConfirm }) {
   const [state, setState] = useState(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
@@ -28,10 +29,12 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   const [sshOpen, setSSHOpen] = useState(false), [selected, setSelected] = useState(""), [username, setUsername] = useState("");
   const [port, setPort] = useState("80"), [appsOpen, setAppsOpen] = useState(false);
   const [controlOpen, setControlOpen] = useState(false), [controlInput, setControlInput] = useState(""), [controlError, setControlError] = useState("");
-  const [unreadable, setUnreadable] = useState("");
+  // recoveryError keeps a failed save from the recovery area visible: every poll
+  // that still finds the settings unreadable clears `error`.
+  const [unreadable, setUnreadable] = useState(""), [recoveryError, setRecoveryError] = useState("");
   const mounted = useRef(true), inflight = useRef(false), loginRequested = useRef(false), revision = useRef(0);
   const ready = status.ready && !status.job?.running;
-  const settingsUnreadable = Boolean(unreadable);
+  const settingsUnreadable = ready && Boolean(unreadable);
   const controlStatus = state?.control_url_status ?? "ok";
   const isUnsupported = controlStatus === "unsupported";
   const isMismatch = controlStatus === "mismatch";
@@ -62,7 +65,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     try {
       const value = await api("/tailscale");
       if (mounted.current && current === revision.current) {
-        setState(value); setError(""); setUnreadable("");
+        setState(value); setError(""); setUnreadable(""); setRecoveryError("");
         if (loginRequested.current && value.auth_url) await openLogin(value);
         if (value.backend === "Running") loginRequested.current = false;
       }
@@ -71,7 +74,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
       if (mounted.current && current === revision.current) {
         if (e.recovery === "tailnet-control-unreadable") {
           setError("");
-          setUnreadable(e.message || "Tailscale 控制服务器设置无法读取，请重新保存控制服务器。");
+          setUnreadable(e.message || unreadableMessage);
         } else setError(e.message);
       }
     }
@@ -91,7 +94,12 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
       const value = await api(`/tailscale/${action}`, body);
       if (mounted.current) { setState(value); if (action === "add-key") setKey(""); }
       return value;
-    } catch (e) { if (mounted.current) setError(e.message); }
+    } catch (e) {
+      if (!mounted.current) return;
+      // Ordinary actions get the same 500 as GET when tailscale.json is unreadable; offer the repair right away.
+      if (e.recovery === "tailnet-control-unreadable") setUnreadable(e.message || unreadableMessage);
+      else setError(e.message);
+    }
     finally { inflight.current = false; if (mounted.current) setBusy(false); }
   };
   const saveControl = async (raw, { confirm = true } = {}) => {
@@ -100,7 +108,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     if (confirm && state?.enabled && normalizeControlInput(next) !== normalizeControlInput(state.control_url || "")) {
       if (!await onConfirm({ title: "切换控制服务器？", body: "当前私网连接会断开。每个控制服务器的设备身份分别保留，切回原服务器后无需重新登录。SSH 公钥保留。", confirm: "切换" })) return;
     }
-    setBusy(true); setError(""); setControlError(""); setNotice(""); revision.current++;
+    setBusy(true); setError(""); setControlError(""); setRecoveryError(""); setNotice(""); revision.current++;
     let needRefresh = false;
     try {
       inflight.current = true;
@@ -116,6 +124,11 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
       if (!mounted.current) return;
       const recovery = e.recovery || "";
       if (recovery === "tailnet-control-invalid") { setControlOpen(true); setControlError(e.message); }
+      else if (settingsUnreadable) {
+        // The host only rewrites tailscale.json after a successful switch, so the recovery area stays.
+        setRecoveryError(e.message || "保存控制服务器失败");
+        needRefresh = recovery === "tailnet-control-pending" || recovery === "tailnet-control-restored";
+      }
       else if (recovery === "tailnet-control-pending") { setError(e.message); setNotice("可再次保存以重试"); needRefresh = true; }
       else if (recovery === "tailnet-control-restored") { setNotice("已恢复原设置"); needRefresh = true; }
       else if (recovery === "tailnet-control-unsupported") setError(e.message);
@@ -154,6 +167,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
         <label className="field-label" htmlFor="tailscale-control-url">自建控制服务器地址</label>
         <div className="tailscale-connect-form"><input id="tailscale-control-url" aria-label="自建控制服务器地址" type="url" placeholder="https://headscale.example.com" value={controlInput} onChange={e => { setControlInput(e.target.value); setControlError(""); }} maxLength={1024} spellCheck={false} /><button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl(controlInput)}>保存并切换</button></div>
         {controlError && <p className="tailscale-control-error" role="alert">{controlError}</p>}
+        {recoveryError && <p className="tailscale-control-error" role="alert">{recoveryError}</p>}
         {error && <p className="tailscale-control-error" role="alert">{error}</p>}
         <button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl("")}>改用 Tailscale 官方服务</button>
       </section> : <>

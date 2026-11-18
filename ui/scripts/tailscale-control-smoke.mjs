@@ -9,7 +9,11 @@ const baseTail = () => ({ installed: true, version: "1.104.5", enabled: false, b
 let tail = baseTail();
 let failControl = null;
 let failGet = null;
+let failAction = null;
+let delayGet = 0;
 const controlCalls = [];
+const unreadable = { status: 500, recovery: "tailnet-control-unreadable", body: "Tailscale 控制服务器设置无法读取，请在 Tailscale 面板重新保存控制服务器" };
+const pending = { status: 502, recovery: "tailnet-control-pending", body: "控制服务器切换结果待核对，请再次保存以重试。" };
 const { browser, page, state, errors } = await createWorkbench({
   beforeNavigate: (_page, fixture) => {
     fixture.status.ready = fixture.status.vm_running = true;
@@ -37,17 +41,20 @@ try {
     const action = new URL(request.url()).pathname.split("/").at(-1);
     const body = request.postDataJSON();
     controlCalls.push({ method: request.method(), action, body });
+    if (request.method() === "GET" && delayGet) await new Promise(resolve => setTimeout(resolve, delayGet));
     if (request.method() === "GET" && failGet) return route.fulfill({ status: failGet.status, contentType: "text/plain; charset=utf-8", headers: { "X-Cage-Recovery": failGet.recovery }, body: failGet.body });
+    if (failAction && action === failAction.action) return route.fulfill({ status: failAction.status, contentType: "text/plain; charset=utf-8", headers: { "X-Cage-Recovery": failAction.recovery }, body: failAction.body });
     if (action === "control-server") {
-      failGet = null;
       if (failControl) return route.fulfill({ status: failControl.status, contentType: "text/plain; charset=utf-8", headers: { "X-Cage-Recovery": failControl.recovery }, body: failControl.body });
+      // Like the host, only a successful switch rewrites tailscale.json.
+      failGet = null;
       const next = body?.control_url ?? "";
       tail = { ...tail, control_url: next, control_url_status: "ok", control_url_applied: next };
       return route.fulfill({ json: tail });
     }
     return route.fulfill({ json: tail });
   });
-  failGet = { status: 500, recovery: "tailnet-control-unreadable", body: "Tailscale 控制服务器设置无法读取，请在 Tailscale 面板重新保存控制服务器" };
+  failGet = unreadable;
   await open.waitFor();
   await open.click();
   const recovery = panel.getByRole("alert", { name: "控制服务器设置无法读取", exact: true });
@@ -67,12 +74,50 @@ try {
   await panel.getByText("已断开", { exact: true }).waitFor();
   assert.equal(await recovery.count(), 0);
   checks.push("saving from the recovery area posts the address, restores the panel and clears the unreadable flag");
-  failGet = { status: 500, recovery: "tailnet-control-unreadable", body: "Tailscale 控制服务器设置无法读取，请在 Tailscale 面板重新保存控制服务器" };
+  failGet = unreadable;
   await recovery.waitFor({ timeout: 6000 });
   await recovery.getByRole("button", { name: "改用 Tailscale 官方服务", exact: true }).click();
   await panel.getByText("已切换到 Tailscale 官方服务", { exact: true }).waitFor();
   assert.deepEqual(controlCalls.at(-1), { method: "POST", action: "control-server", body: { control_url: "" } });
   checks.push("official switch in the recovery area posts an empty control_url");
+  failGet = unreadable;
+  await recovery.waitFor({ timeout: 6000 });
+  failControl = pending;
+  await recoveryInput.fill("https://hs.example.com");
+  await recovery.getByRole("button", { name: "保存并切换", exact: true }).click();
+  const pendingMessage = recovery.getByText(pending.body, { exact: true });
+  await pendingMessage.waitFor();
+  const reads = () => controlCalls.filter(call => call.method === "GET").length;
+  const readsAfterFailure = reads();
+  await waitFor(() => reads() >= readsAfterFailure + 2, "the panel stopped reading the state after a failed recovery save");
+  assert.equal(await recovery.count(), 1);
+  assert.equal(await pendingMessage.count(), 1);
+  assert.deepEqual(controlCalls.filter(call => call.action === "control-server").at(-1), { method: "POST", action: "control-server", body: { control_url: "https://hs.example.com" } });
+  checks.push("a failed save from the recovery area stays visible while the settings remain unreadable");
+  failControl = null;
+  state.status.job = { id: "tailscale-control-smoke", kind: "settings", running: true };
+  await panel.getByText("等待 Cage 环境就绪", { exact: true }).waitFor({ timeout: 20000 });
+  assert.equal(await recovery.count(), 0);
+  state.status.job = { running: false };
+  await recovery.waitFor({ timeout: 20000 });
+  checks.push("the recovery area gives way to the not-ready notice while the environment is busy");
+  const savesBeforeRead = controlCalls.filter(call => call.action === "control-server").length;
+  failGet = null;
+  await recovery.waitFor({ state: "detached", timeout: 6000 });
+  await panel.getByText("已断开", { exact: true }).waitFor();
+  assert.equal(controlCalls.filter(call => call.action === "control-server").length, savesBeforeRead);
+  checks.push("a later successful read leaves the recovery area without saving again");
+  failGet = unreadable;
+  delayGet = 4000;
+  failAction = { action: "connect", ...unreadable };
+  await panel.getByRole("button", { name: "连接并登录", exact: true }).click();
+  await recovery.waitFor({ timeout: 2000 });
+  assert.equal(await pendingMessage.count(), 0);
+  checks.push("an action that finds the settings unreadable opens the recovery area at once");
+  failAction = null;
+  delayGet = 0;
+  failGet = null;
+  await recovery.waitFor({ state: "detached", timeout: 10000 });
   await open.waitFor();
   await open.click();
   await panel.getByText("已断开", { exact: true }).waitFor();
