@@ -255,23 +255,29 @@ func maskTailnetState(result map[string]json.RawMessage) ([]byte, error) {
 		return nil, errInvalidTailnetState
 	}
 	known := collectTailnetKeyMaterial(lines)
+	out := make(map[string]json.RawMessage, len(result)+1)
+	used := map[string]bool{"ssh_keys": true}
 	for name, raw := range result {
 		if name == "keys" {
 			continue
 		}
+		newName, _ := scrubJSONString(name, known, false)
+		if used[newName] {
+			return nil, errInvalidTailnetState
+		}
+		used[newName] = true
 		scrubbed, err := scrubTailnetField(name, raw, known)
 		if err != nil {
 			return nil, err
 		}
-		result[name] = scrubbed
+		out[newName] = scrubbed
 	}
-	delete(result, "keys")
-	result["ssh_keys"] = encoded
-	out, err := json.Marshal(result)
+	out["ssh_keys"] = encoded
+	masked, err := json.Marshal(out)
 	if err != nil {
 		return nil, errInvalidTailnetState
 	}
-	return out, nil
+	return masked, nil
 }
 
 func (s *Server) callTailnet(ctx context.Context, token, action, key, host string, port int) (map[string]json.RawMessage, error) {

@@ -727,3 +727,177 @@ func TestTailnetKeyAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func escapeTailnetJSONKey(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch r {
+		case 'A':
+			b.WriteString(`\u0041`)
+		case '/':
+			b.WriteString(`\/`)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func tailnetStateWithField(t *testing.T, line, field string, extra map[string]json.RawMessage) []byte {
+	t.Helper()
+	base, err := json.Marshal(map[string]any{"installed": true, "keys": []string{line}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(base, &obj) != nil {
+		t.Fatal(base)
+	}
+	if field != "" {
+		obj[field] = json.RawMessage(`"x"`)
+	}
+	for k, v := range extra {
+		obj[k] = v
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func serveTailnetRaw(t *testing.T, s *Server, raw []byte) {
+	t.Helper()
+	serveTailnetGuest(t, s, func(w http.ResponseWriter, _ tailnetGuestInput) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(raw)
+	})
+}
+
+func TestTailnetKeyTopLevelFieldNames(t *testing.T) {
+	line, body, _ := testAuthorizedKey(t, "top")
+	escaped := `{"installed":true,"keys":[` + string(mustJSON(t, line)) + `],"` + escapeTailnetJSONKey(body) + `":"x"}`
+	named := tailnetStateWithField(t, line, body, nil)
+	collision := tailnetStateWithField(t, line, body, map[string]json.RawMessage{hiddenTailnetKey: json.RawMessage(`"y"`)})
+
+	t.Run("body GET", func(t *testing.T) {
+		s := testServer(t)
+		serveTailnetRaw(t, s, named)
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		assertNoMaterial(t, w.Body.Bytes(), body)
+		if !bytes.Contains(w.Body.Bytes(), []byte(hiddenTailnetKey)) {
+			t.Fatal(w.Body.String())
+		}
+		_ = decodeSSHKeys(t, w.Body.Bytes())
+	})
+	t.Run("body agent", func(t *testing.T) {
+		s := agentTestController(t)
+		serveTailnetRaw(t, s, named)
+		data, err := AgentCall(context.Background(), s.configPath, "tailscale.get", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNoMaterial(t, data, body)
+		if !bytes.Contains(data, []byte(hiddenTailnetKey)) {
+			t.Fatal(data)
+		}
+	})
+	t.Run("escaped GET", func(t *testing.T) {
+		s := testServer(t)
+		serveTailnetRaw(t, s, []byte(escaped))
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		assertNoMaterial(t, w.Body.Bytes(), body)
+		_ = decodeSSHKeys(t, w.Body.Bytes())
+	})
+	t.Run("escaped agent", func(t *testing.T) {
+		s := agentTestController(t)
+		serveTailnetRaw(t, s, []byte(escaped))
+		data, err := AgentCall(context.Background(), s.configPath, "tailscale.get", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertNoMaterial(t, data, body)
+	})
+	t.Run("collision GET", func(t *testing.T) {
+		s := testServer(t)
+		serveTailnetRaw(t, s, collision)
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		if w.Code != 502 || !strings.Contains(w.Body.String(), "Tailscale 组件返回了无效状态") {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		assertNoMaterial(t, w.Body.Bytes(), body)
+	})
+	t.Run("collision agent", func(t *testing.T) {
+		s := agentTestController(t)
+		serveTailnetRaw(t, s, collision)
+		data, err := AgentCall(context.Background(), s.configPath, "tailscale.get", nil)
+		if err == nil {
+			t.Fatal(data)
+		}
+		var ae *AgentError
+		if !errors.As(err, &ae) {
+			t.Fatal(err)
+		}
+		assertNoMaterial(t, []byte(ae.Message), body)
+		assertNoMaterial(t, data, body)
+	})
+}
+
+func mustJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestTailnetKeyRevealLocked(t *testing.T) {
+	s := testServer(t)
+	s.account = newTestAccount(t)
+	var called atomic.Bool
+	serveTailnetGuest(t, s, func(w http.ResponseWriter, _ tailnetGuestInput) {
+		called.Store(true)
+		writeTailnetGuestJSON(w, map[string]any{"installed": true, "keys": []string{}})
+	})
+	s.account.lock()
+	w := request(s, "POST", "/api/tailscale/reveal-key", s.origin, `{"id":"SHA256:test","account_password":"initial-test-password"}`, true)
+	if w.Code != http.StatusLocked {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if called.Load() {
+		t.Fatal("guest called while locked")
+	}
+}
+
+func TestTailnetKeyRevealSharesVaultRateLimit(t *testing.T) {
+	s := testServer(t)
+	s.account = newTestAccount(t)
+	save := `{"action":"save","entry":{"origin":"https://mail.example.com","username":"alice@example.com","password":"mail-secret"}}`
+	if w := request(s, "POST", "/api/vault", s.origin, save, true); w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	list := request(s, "GET", "/api/vault", s.origin, "", true)
+	var db vaultData
+	if json.Unmarshal(list.Body.Bytes(), &db) != nil || len(db.Entries) != 1 {
+		t.Fatal(list.Body.String())
+	}
+	w := request(s, "POST", "/api/tailscale/reveal-key", s.origin, `{"id":"SHA256:test","account_password":"wrong"}`, true)
+	if w.Code != 400 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	b, _ := json.Marshal(map[string]string{"action": "reveal", "id": db.Entries[0].ID, "account_password": "initial-test-password"})
+	w = request(s, "POST", "/api/vault", s.origin, string(b), true)
+	if w.Code != 400 || !strings.Contains(w.Body.String(), "请稍后再试") {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if strings.Contains(w.Body.String(), "mail-secret") {
+		t.Fatal("vault reveal leaked password")
+	}
+}
