@@ -155,35 +155,47 @@ func scrubJSONString(s string, known []string, freeText bool) (string, bool) {
 	return out, out != s
 }
 
-func scrubJSONValue(v any, known []string, freeText bool) (any, bool) {
+func scrubJSONValue(v any, known []string, freeText bool) (any, bool, error) {
 	switch val := v.(type) {
 	case string:
-		return scrubJSONString(val, known, freeText)
+		s, c := scrubJSONString(val, known, freeText)
+		return s, c, nil
 	case []any:
 		changed := false
 		out := make([]any, len(val))
 		for i, item := range val {
-			nv, c := scrubJSONValue(item, known, freeText)
+			nv, c, err := scrubJSONValue(item, known, freeText)
+			if err != nil {
+				return nil, false, err
+			}
 			out[i] = nv
 			changed = changed || c
 		}
-		return out, changed
+		return out, changed, nil
 	case map[string]any:
 		changed := false
 		out := make(map[string]any, len(val))
+		used := make(map[string]bool, len(val))
 		for k, item := range val {
 			nk, kc := scrubJSONString(k, known, false)
-			nv, vc := scrubJSONValue(item, known, freeText)
+			if used[nk] {
+				return nil, false, errInvalidTailnetState
+			}
+			used[nk] = true
+			nv, vc, err := scrubJSONValue(item, known, freeText)
+			if err != nil {
+				return nil, false, err
+			}
 			out[nk] = nv
 			changed = changed || kc || vc
 		}
-		return out, changed
+		return out, changed, nil
 	default:
-		return v, false
+		return v, false, nil
 	}
 }
 
-func scrubHealthValue(v any, known []string) (any, bool) {
+func scrubHealthValue(v any, known []string) (any, bool, error) {
 	arr, ok := v.([]any)
 	if !ok {
 		return scrubJSONValue(v, known, false)
@@ -197,11 +209,14 @@ func scrubHealthValue(v any, known []string) (any, bool) {
 			changed = changed || c
 			continue
 		}
-		nv, c := scrubJSONValue(item, known, false)
+		nv, c, err := scrubJSONValue(item, known, false)
+		if err != nil {
+			return nil, false, err
+		}
 		out[i] = nv
 		changed = changed || c
 	}
-	return out, changed
+	return out, changed, nil
 }
 
 func scrubTailnetField(name string, raw json.RawMessage, known []string) (json.RawMessage, error) {
@@ -218,12 +233,15 @@ func scrubTailnetField(name string, raw json.RawMessage, known []string) (json.R
 		if s, ok := v.(string); ok {
 			out, changed = scrubJSONString(s, known, true)
 		} else {
-			out, changed = scrubJSONValue(v, known, false)
+			out, changed, err = scrubJSONValue(v, known, false)
 		}
 	case "health":
-		out, changed = scrubHealthValue(v, known)
+		out, changed, err = scrubHealthValue(v, known)
 	default:
-		out, changed = scrubJSONValue(v, known, false)
+		out, changed, err = scrubJSONValue(v, known, false)
+	}
+	if err != nil {
+		return nil, err
 	}
 	if !changed {
 		return raw, nil

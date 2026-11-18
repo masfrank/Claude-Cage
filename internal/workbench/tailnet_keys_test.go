@@ -901,3 +901,88 @@ func TestTailnetKeyRevealSharesVaultRateLimit(t *testing.T) {
 		t.Fatal("vault reveal leaked password")
 	}
 }
+
+func tailnetStateWithNested(t *testing.T, lines []string, nested map[string]any) []byte {
+	t.Helper()
+	out, err := json.Marshal(map[string]any{"installed": true, "keys": lines, "meta": nested})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestTailnetKeyNestedFieldNames(t *testing.T) {
+	line1, body1, _ := testAuthorizedKey(t, "a")
+	line2, body2, _ := testAuthorizedKey(t, "b")
+	twoBodies := tailnetStateWithNested(t, []string{line1, line2}, map[string]any{body1: "keep-a", body2: "keep-b"})
+	withHidden := tailnetStateWithNested(t, []string{line1}, map[string]any{body1: "keep-a", hiddenTailnetKey: "keep-hidden"})
+	single := tailnetStateWithNested(t, []string{line1}, map[string]any{body1: "keep-value", "other": "ok"})
+
+	assert502 := func(t *testing.T, raw []byte, materials ...string) {
+		t.Helper()
+		s := testServer(t)
+		serveTailnetRaw(t, s, raw)
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		if w.Code != 502 || !strings.Contains(w.Body.String(), "Tailscale 组件返回了无效状态") {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		assertNoMaterial(t, w.Body.Bytes(), materials...)
+	}
+	assertAgent502 := func(t *testing.T, raw []byte, materials ...string) {
+		t.Helper()
+		s := agentTestController(t)
+		serveTailnetRaw(t, s, raw)
+		data, err := AgentCall(context.Background(), s.configPath, "tailscale.get", nil)
+		if err == nil {
+			t.Fatal(data)
+		}
+		var ae *AgentError
+		if !errors.As(err, &ae) {
+			t.Fatal(err)
+		}
+		assertNoMaterial(t, []byte(ae.Message), materials...)
+		assertNoMaterial(t, data, materials...)
+	}
+	assertOK := func(t *testing.T, body []byte) {
+		t.Helper()
+		assertNoMaterial(t, body, body1)
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(body, &obj) != nil {
+			t.Fatal(body)
+		}
+		var meta map[string]any
+		if json.Unmarshal(obj["meta"], &meta) != nil {
+			t.Fatal(obj["meta"])
+		}
+		if _, ok := meta[body1]; ok {
+			t.Fatal("nested key leaked")
+		}
+		if meta[hiddenTailnetKey] != "keep-value" || meta["other"] != "ok" {
+			t.Fatalf("%#v", meta)
+		}
+	}
+
+	t.Run("two bodies GET", func(t *testing.T) { assert502(t, twoBodies, body1, body2) })
+	t.Run("two bodies agent", func(t *testing.T) { assertAgent502(t, twoBodies, body1, body2) })
+	t.Run("collision GET", func(t *testing.T) { assert502(t, withHidden, body1) })
+	t.Run("collision agent", func(t *testing.T) { assertAgent502(t, withHidden, body1) })
+	t.Run("single GET", func(t *testing.T) {
+		s := testServer(t)
+		serveTailnetRaw(t, s, single)
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		if w.Code != 200 {
+			t.Fatal(w.Code, w.Body.String())
+		}
+		assertOK(t, w.Body.Bytes())
+		_ = decodeSSHKeys(t, w.Body.Bytes())
+	})
+	t.Run("single agent", func(t *testing.T) {
+		s := agentTestController(t)
+		serveTailnetRaw(t, s, single)
+		data, err := AgentCall(context.Background(), s.configPath, "tailscale.get", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertOK(t, data)
+	})
+}
