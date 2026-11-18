@@ -30,6 +30,13 @@ var controlURLVectors = []struct {
 	{"https://[::1]", "https://[::1]", true},
 	{"https://[::1]:443", "https://[::1]", true},
 	{"https://[::1]:8443", "https://[::1]:8443", true},
+	{"https://[2001:db8::1]", "https://[2001:db8::1]", true},
+	{"https://[2001:db8::1]:443", "https://[2001:db8::1]", true},
+	{"https://[2001:db8::1]:8443", "https://[2001:db8::1]:8443", true},
+	{"https://[2001:DB8::1]:443/", "https://[2001:db8::1]", true},
+	{"https://xn--bcher-kva.example", "https://xn--bcher-kva.example", true},
+	{"https://XN--BCHER-KVA.EXAMPLE:443/", "https://xn--bcher-kva.example", true},
+	{"https://bücher.example", "https://bücher.example", true},
 	{"  https://hs.example.com  ", "https://hs.example.com", true},
 	{"https://login.tailscale.com", "", true},
 	{"https://controlplane.tailscale.com", "", true},
@@ -70,29 +77,40 @@ func TestNormalizeControlURL(t *testing.T) {
 }
 
 func TestValidCustomTailnetAuthURL(t *testing.T) {
-	desired := "https://hs.example.com"
-	for _, u := range []string{"https://hs.example.com/register/abc", "https://HS.Example.COM:443/register/abc", "https://hs.example.com/a/x"} {
-		if !validCustomTailnetAuthURL(u, desired) {
-			t.Fatal(u)
-		}
-	}
-	desiredPort := "https://hs.example.com:8443"
-	if !validCustomTailnetAuthURL("https://hs.example.com:8443/register/abc", desiredPort) {
-		t.Fatal("explicit port")
-	}
-	for _, u := range []string{
-		"https://hs.example.com.evil.test/register/abc",
-		"https://hs.example.com:8443/register/abc",
-		"https://user@hs.example.com/register/abc",
-		"https://hs.example.com/register/abc#x",
-		"http://hs.example.com/register/abc",
-		"https://hs.example.com\\register",
-		"javascript:alert(1)",
-		"//hs.example.com/register/abc",
-		"https://xn--hs-example-com.test/register/abc",
+	for _, c := range []struct {
+		raw, desired string
+		ok           bool
+	}{
+		{"https://hs.example.com/register/abc", "https://hs.example.com", true},
+		{"https://HS.Example.COM:443/register/abc", "https://hs.example.com", true},
+		{"https://hs.example.com/a/x", "https://hs.example.com", true},
+		{"https://HS.EXAMPLE.COM/register/abc", "https://hs.example.com", true},
+		{"https://hs.example.com:8443/register/abc", "https://hs.example.com:8443", true},
+		{"https://[2001:db8::1]:8443/register/abc", "https://[2001:db8::1]:8443", true},
+		{"https://[2001:DB8::1]:8443/register/abc", "https://[2001:db8::1]:8443", true},
+		{"https://[2001:db8::1]:443/register/abc", "https://[2001:db8::1]", true},
+		{"https://[2001:db8::1]/register/abc", "https://[2001:db8::1]:8443", false},
+		{"https://[2001:db8::1]:8444/register/abc", "https://[2001:db8::1]:8443", false},
+		{"https://[2001:db8::2]:8443/register/abc", "https://[2001:db8::1]:8443", false},
+		{"https://hs.example.com:0/register/abc", "https://hs.example.com", false},
+		{"https://hs.example.com:65536/register/abc", "https://hs.example.com", false},
+		{"https://hs.example.com:08443/register/abc", "https://hs.example.com:8443", false},
+		{"https://hs.example.com:abc/register/abc", "https://hs.example.com", false},
+		{"https://bücher.example/register/abc", "https://xn--bcher-kva.example", false},
+		{"https://hs.example.com./register/x", "https://hs.example.com", false},
+		{"https://hs%2eexample.com/register/abc", "https://hs.example.com", false},
+		{"https://hs.example.com.evil.test/register/abc", "https://hs.example.com", false},
+		{"https://hs.example.com:8443/register/abc", "https://hs.example.com", false},
+		{"https://user@hs.example.com/register/abc", "https://hs.example.com", false},
+		{"https://hs.example.com/register/abc#x", "https://hs.example.com", false},
+		{"http://hs.example.com/register/abc", "https://hs.example.com", false},
+		{"https://hs.example.com\\register", "https://hs.example.com", false},
+		{"javascript:alert(1)", "https://hs.example.com", false},
+		{"//hs.example.com/register/abc", "https://hs.example.com", false},
+		{"https://xn--hs-example-com.test/register/abc", "https://hs.example.com", false},
 	} {
-		if validCustomTailnetAuthURL(u, desired) {
-			t.Fatal(u)
+		if got := validCustomTailnetAuthURL(c.raw, c.desired); got != c.ok {
+			t.Fatalf("%q desired %q: got %v want %v", c.raw, c.desired, got, c.ok)
 		}
 	}
 }

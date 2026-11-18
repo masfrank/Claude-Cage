@@ -37,6 +37,13 @@ var controlURLVectors = []struct {
 	{"https://[::1]", "https://[::1]", true},
 	{"https://[::1]:443", "https://[::1]", true},
 	{"https://[::1]:8443", "https://[::1]:8443", true},
+	{"https://[2001:db8::1]", "https://[2001:db8::1]", true},
+	{"https://[2001:db8::1]:443", "https://[2001:db8::1]", true},
+	{"https://[2001:db8::1]:8443", "https://[2001:db8::1]:8443", true},
+	{"https://[2001:DB8::1]:443/", "https://[2001:db8::1]", true},
+	{"https://xn--bcher-kva.example", "https://xn--bcher-kva.example", true},
+	{"https://XN--BCHER-KVA.EXAMPLE:443/", "https://xn--bcher-kva.example", true},
+	{"https://bücher.example", "https://bücher.example", true},
 	{"  https://hs.example.com  ", "https://hs.example.com", true},
 	{"https://login.tailscale.com", "", true},
 	{"https://controlplane.tailscale.com", "", true},
@@ -111,6 +118,95 @@ func TestUseControlURLRejectsInvalidAndKeepsState(t *testing.T) {
 	}
 	if n.config.ControlURL != "https://hs.example.com" {
 		t.Fatal(n.config.ControlURL)
+	}
+}
+
+func TestPersistedInvalidControlURLDoesNotStart(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"enabled":true,"control_url":"http://hs.example.com"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	n, err := newNode(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !n.config.Enabled || n.config.ControlURL != "http://hs.example.com" {
+		t.Fatalf("%+v", n.config)
+	}
+	if err := n.start(); err == nil || n.server != nil || n.startError == "" {
+		t.Fatalf("started invalid control url: server=%v err=%v startError=%q", n.server, err, n.startError)
+	}
+	st, err := n.snapshot(context.Background())
+	if err != nil || st.ControlURL != "http://hs.example.com" {
+		t.Fatalf("%+v %v", st, err)
+	}
+	if !strings.Contains(strings.Join(st.Health, "\n"), "已保存的控制服务器地址无效") {
+		t.Fatal(st.Health)
+	}
+	n.config.Enabled = false
+	if err := n.useControlURL(""); err != nil {
+		t.Fatal(err)
+	}
+	if n.config.ControlURL != "" || n.invalidControl {
+		t.Fatalf("%+v invalid=%v", n.config, n.invalidControl)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(`{"enabled":true,"control_url":"https://hs.example.com/headscale"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	n, err = newNode(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := "https://hs.example.com"
+	sum := sha256.Sum256([]byte(next))
+	if err := os.MkdirAll(filepath.Join(n.dir, "servers"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(n.dir, "servers", hex.EncodeToString(sum[:])), []byte("blocked"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := n.start(); err == nil || n.server != nil {
+		t.Fatal("started with path in control url")
+	}
+	if err := n.useControlURL(next); err != nil {
+		t.Fatal(err)
+	}
+	if n.config.ControlURL != next || n.invalidControl || n.server != nil {
+		t.Fatalf("%+v invalid=%v server=%v", n.config, n.invalidControl, n.server)
+	}
+	st, err = n.snapshot(context.Background())
+	if err != nil || st.ControlURL != next {
+		t.Fatalf("%+v %v", st, err)
+	}
+	if strings.Contains(strings.Join(st.Health, "\n"), "已保存的控制服务器地址无效") {
+		t.Fatal(st.Health)
+	}
+}
+
+func TestPersistedControlURLIsNormalized(t *testing.T) {
+	for _, c := range []struct{ raw, want string }{
+		{"HTTPS://Headscale.Example.COM:443/", "https://headscale.example.com"},
+		{"https://[2001:DB8::1]:443/", "https://[2001:db8::1]"},
+	} {
+		dir := t.TempDir()
+		b, err := json.Marshal(settings{ControlURL: c.raw})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), b, 0600); err != nil {
+			t.Fatal(err)
+		}
+		n, err := newNode(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n.config.ControlURL != c.want || n.invalidControl {
+			t.Fatalf("%q: got %q invalid=%v", c.raw, n.config.ControlURL, n.invalidControl)
+		}
+		sum := sha256.Sum256([]byte(c.want))
+		if n.stateDir() != filepath.Join(n.dir, "servers", hex.EncodeToString(sum[:])) {
+			t.Fatal(n.stateDir())
+		}
 	}
 }
 
@@ -325,8 +421,14 @@ func TestSwitchControlURLIsolatesIdentity(t *testing.T) {
 	if restarted.config.ControlURL != a.URL || !restarted.config.Enabled {
 		t.Fatalf("%+v", restarted.config)
 	}
-	if err := restarted.start(); err != nil {
+	if !restarted.invalidControl {
+		t.Fatal("http testcontrol should be rejected until switchControlURL")
+	}
+	if err := restarted.switchControlURL(a.URL); err != nil {
 		t.Fatal(err)
+	}
+	if restarted.server == nil {
+		t.Fatal(restarted.startError)
 	}
 	defer func() { restarted.mu.Lock(); restarted.stop(); restarted.mu.Unlock() }()
 	again, err := restarted.server.Up(ctx)

@@ -13,6 +13,8 @@ import (
 	"unicode"
 )
 
+const invalidPersistedControlURL = "已保存的控制服务器地址无效，请在 Tailscale 面板重新保存控制服务器"
+
 func inheritedTailnetEnv() []string {
 	return []string{"TS_AUTHKEY", "TS_AUTH_KEY", "TS_CLIENT_SECRET", "TS_CLIENT_ID", "TSNET_FORCE_LOGIN", "TS_CONTROL_URL"}
 }
@@ -83,6 +85,19 @@ func (n *node) stateDir() string {
 	return filepath.Join(n.dir, "servers", hex.EncodeToString(sum[:]))
 }
 
+func (n *node) applyPersistedControlURL() {
+	if n.config.ControlURL == "" {
+		return
+	}
+	normalized, err := normalizeControlURL(n.config.ControlURL)
+	if err != nil {
+		n.invalidControl = true
+		n.startError = invalidPersistedControlURL
+		return
+	}
+	n.config.ControlURL = normalized
+}
+
 func (n *node) useControlURL(raw string) error {
 	next, err := normalizeControlURL(raw)
 	if err != nil {
@@ -92,16 +107,19 @@ func (n *node) useControlURL(raw string) error {
 }
 
 func (n *node) switchControlURL(next string) error {
-	if n.config.ControlURL == next {
+	if n.config.ControlURL == next && !n.invalidControl {
 		return nil
 	}
 	wasRunning := n.server != nil
 	n.stop()
 	_ = n.writeSSHConfig(nil)
 	prev := n.config.ControlURL
+	prevInvalid := n.invalidControl
 	n.config.ControlURL = next
+	n.invalidControl = false
 	if err := n.save(); err != nil {
 		n.config.ControlURL = prev
+		n.invalidControl = prevInvalid
 		if wasRunning {
 			_ = n.start()
 		}

@@ -75,16 +75,17 @@ type state struct {
 	Forwards   []forwardState `json:"forwards"`
 }
 type node struct {
-	mu          sync.Mutex
-	dir         string
-	config      settings
-	server      *tsnet.Server
-	client      *local.Client
-	ssh         *gliderssh.Server
-	listener    net.Listener
-	connections map[net.Conn]bool
-	forwards    map[string]*tailnetForward
-	startError  string
+	mu             sync.Mutex
+	dir            string
+	config         settings
+	server         *tsnet.Server
+	client         *local.Client
+	ssh            *gliderssh.Server
+	listener       net.Listener
+	connections    map[net.Conn]bool
+	forwards       map[string]*tailnetForward
+	startError     string
+	invalidControl bool
 }
 
 func dataDir() string {
@@ -106,6 +107,7 @@ func newNode(dir string) (*node, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
+	n.applyPersistedControlURL()
 	return n, nil
 }
 func (n *node) save() error {
@@ -120,6 +122,10 @@ func (n *node) start() error {
 	if n.server != nil {
 		n.startError = ""
 		return nil
+	}
+	if n.invalidControl {
+		n.startError = invalidPersistedControlURL
+		return errors.New(n.startError)
 	}
 	dir := n.stateDir()
 	if dir != n.dir {
