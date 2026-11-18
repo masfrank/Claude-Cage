@@ -22,7 +22,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   const [revealError, setRevealError] = useState(""), [revealBusy, setRevealBusy] = useState(false), [revealed, setRevealed] = useState(null);
   const [port, setPort] = useState("80"), [appsOpen, setAppsOpen] = useState(false);
   const mounted = useRef(true), inflight = useRef(false), loginRequested = useRef(false), revision = useRef(0);
-  const revealGeneration = useRef(0);
+  const revealGeneration = useRef(0), revealInflight = useRef(0);
   const ready = status.ready && !status.job?.running;
   const connected = ready && state?.backend === "Running";
   const address = state?.ips?.find(ip => !ip.includes(":"));
@@ -91,6 +91,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     const id = revealFor;
     if (!id) return;
     const generation = ++revealGeneration.current;
+    revealInflight.current = generation;
     setRevealBusy(true); setRevealError("");
     try {
       const value = await api("/tailscale/reveal-key", { id, account_password: revealPassword });
@@ -99,7 +100,10 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     } catch (error) {
       if (mounted.current && generation === revealGeneration.current) setRevealError(error.message);
     } finally {
-      if (mounted.current) { setRevealPassword(""); setRevealBusy(false); }
+      if (mounted.current) {
+        if (revealInflight.current === generation) { revealInflight.current = 0; setRevealBusy(false); }
+        if (generation === revealGeneration.current) setRevealPassword("");
+      }
     }
   };
   const stop = async logout => {

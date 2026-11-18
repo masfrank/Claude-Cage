@@ -180,11 +180,14 @@ try {
     await delivered;
     await settle();
   };
-  const expectNoReveal = async () => {
-    await page.waitForFunction(() => [...document.querySelectorAll('input[type="password"]')].every(input => input.value === ""));
+  const expectNoKeyOutput = async () => {
     assert.deepEqual(await page.evaluate(() => window.__seenKeyOutputs), []);
     assert.equal(await page.locator('output[aria-label="SSH 公钥全文"]').count(), 0);
     assert.ok(!(await page.evaluate(() => document.body.innerHTML)).includes("AAAAFixture"));
+  };
+  const expectNoReveal = async () => {
+    await page.waitForFunction(() => [...document.querySelectorAll('input[type="password"]')].every(input => input.value === ""));
+    await expectNoKeyOutput();
   };
   await beginHeldReveal();
   await page.evaluate(() => window.dispatchEvent(new Event("blur")));
@@ -225,6 +228,24 @@ try {
   await open.click(); await panel.getByText("已连接", { exact: true }).waitFor();
   await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).click(); await keyRows.first().waitFor();
   checks.push("held reveal responses are discarded after blur, cancel, visibilitychange, collapsing the section, re-opening 查看 on either key, disconnect, the key disappearing on the next poll, and unmounting the panel");
+  await beginHeldReveal();
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  await viewLocal.click();
+  await password().fill("typed-after");
+  await finishHeldReveal();
+  assert.equal(await password().inputValue(), "typed-after");
+  assert.equal(await panel.getByRole("button", { name: "查看公钥", exact: true }).isDisabled(), false);
+  await expectNoKeyOutput();
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  await beginHeldReveal();
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await finishHeldReveal(); await expectNoReveal();
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  await viewLocal.click();
+  await password().fill("typed-after");
+  assert.equal(await panel.getByRole("button", { name: "查看公钥", exact: true }).isDisabled(), false);
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  checks.push("an invalidated reveal preserves a newly typed password and re-enables submit; blur leaves submit usable after release");
   await viewLocal.click(); await password().fill("correct-password");
   await panel.getByRole("button", { name: "查看公钥", exact: true }).click(); await keyOutput.waitFor();
   await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).click();
