@@ -271,7 +271,7 @@ cage agent call settings.get --scope selected --connection 当前连接代次
 | Claude 账号、额度、分组、启停、调度与排序 | claude-accounts.get/change，动作与字段类型由 capabilities 给出；业务 action 与界面相同。 |
 | 密码保险箱 | vault.get 列元数据；vault.change 的 action 为 save/delete/unblock/reveal；reveal 仍需 account_password，再次验证后返回真实密码；vault.browser 提供页面填充和保存。 |
 | 手机配对 | mobile.get/pair/remove；自建中继输入 admin/relay，配对结果是私密邀请码。 |
-| Tailscale 与 SSH 公钥 | tailscale.get，以及 install/connect/login/disconnect/logout/add-key/remove-key；公钥字段为 key。 |
+| Tailscale 与 SSH 公钥 | tailscale.get，以及 install/connect/login/disconnect/logout/add-key/remove-key/reveal-key。get 只以 ssh_keys 元数据（id、type、comment）列出公钥；remove-key 传 id 或 key，二选一；reveal-key 需要 account_password，返回公钥全文，由调用方自行保管。 |
 | 浏览器首页 | browser.preferences.get/set；set 立即更新浏览器，失败保留旧值，长度限制与界面一致。settings.patch 单独修改首页时复用同一保存流程。 |
 | Cookie、权限、扩展、收藏 | browser.cookies/settings/extensions；favorites.get/change。Cookie 的 mode、scope、id、cookieKey 与界面相同。 |
 | 客机首次设置、登录与授权窗口 | request 访问 /api/macos/first-setup、/api/macos/login、当前构建提供的 /api/macos/maintenance、/api/macos/project-approval；会话、截图和键鼠动作与界面一致。 |

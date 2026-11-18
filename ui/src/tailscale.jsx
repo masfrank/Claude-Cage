@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Copy, ExternalLink, KeyRound, LoaderCircle, Monitor, Network, RefreshCw, Search, Smartphone, Terminal, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Copy, ExternalLink, Eye, KeyRound, LoaderCircle, Monitor, Network, RefreshCw, Search, Smartphone, Terminal, Trash2 } from "lucide-react";
 import { api, writeClipboard } from "./api";
 import "./tailscale.css";
 
@@ -18,11 +18,15 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   const [loginError, setLoginError] = useState("");
   const [key, setKey] = useState(""), [notice, setNotice] = useState(""), [query, setQuery] = useState("");
   const [sshOpen, setSSHOpen] = useState(false), [selected, setSelected] = useState(""), [username, setUsername] = useState("");
+  const [revealFor, setRevealFor] = useState(""), [revealPassword, setRevealPassword] = useState("");
+  const [revealError, setRevealError] = useState(""), [revealBusy, setRevealBusy] = useState(false), [revealed, setRevealed] = useState(null);
   const [port, setPort] = useState("80"), [appsOpen, setAppsOpen] = useState(false);
   const mounted = useRef(true), inflight = useRef(false), loginRequested = useRef(false), revision = useRef(0);
+  const revealGeneration = useRef(0);
   const ready = status.ready && !status.job?.running;
   const connected = ready && state?.backend === "Running";
   const address = state?.ips?.find(ip => !ip.includes(":"));
+  const sshKeys = state?.ssh_keys || [];
   const peers = [...(state?.peers || [])].sort((a, b) => Number(b.online) - Number(a.online) || deviceName(a).localeCompare(deviceName(b)));
   const visible = peers.filter(peer => [deviceName(peer), peer.name, peer.ip, peer.os].some(value => value?.toLowerCase().includes(query.trim().toLowerCase())));
   const openLogin = async value => {
@@ -73,11 +77,58 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     try { await writeClipboard(text); setNotice(message); }
     catch { setNotice("复制失败，请选中文本手动复制。"); }
   };
+  const closeReveal = () => {
+    revealGeneration.current++;
+    setRevealed(null); setRevealFor(""); setRevealPassword(""); setRevealError("");
+  };
+  const toggleReveal = id => {
+    revealGeneration.current++;
+    setRevealed(null); setRevealPassword(""); setRevealError("");
+    setRevealFor(current => current === id ? "" : id);
+  };
+  const reveal = async event => {
+    event.preventDefault();
+    const id = revealFor;
+    if (!id) return;
+    const generation = ++revealGeneration.current;
+    setRevealBusy(true); setRevealError("");
+    try {
+      const value = await api("/tailscale/reveal-key", { id, account_password: revealPassword });
+      if (!mounted.current || generation !== revealGeneration.current) return;
+      setRevealed({ id, key: value.key });
+    } catch (error) {
+      if (mounted.current && generation === revealGeneration.current) setRevealError(error.message);
+    } finally {
+      if (mounted.current) { setRevealPassword(""); setRevealBusy(false); }
+    }
+  };
   const stop = async logout => {
     if (!await onConfirm({ title: logout ? "退出 Tailscale 登录？" : "断开 Tailscale？", body: logout ? "私网连接会中断，下次连接需要重新登录。已添加的 SSH 公钥保留。" : "正在使用的私网连接会中断，登录状态和 SSH 公钥保留。", confirm: logout ? "退出登录" : "断开连接" })) return;
     loginRequested.current = false;
     if (await act(logout ? "logout" : "disconnect")) { setSelected(""); setSSHOpen(false); }
   };
+  useEffect(() => {
+    const clear = () => { revealGeneration.current++; setRevealed(null); setRevealPassword(""); };
+    window.addEventListener("blur", clear);
+    document.addEventListener("visibilitychange", clear);
+    return () => {
+      window.removeEventListener("blur", clear);
+      document.removeEventListener("visibilitychange", clear);
+      revealGeneration.current++;
+    };
+  }, []);
+  useEffect(() => { if (!sshOpen || !connected) closeReveal(); }, [sshOpen, connected]);
+  const keyIds = sshKeys.map(entry => entry.id).join("|");
+  useEffect(() => {
+    if (!revealFor && !revealed) return;
+    const ids = new Set(sshKeys.map(entry => entry.id));
+    if ((revealFor && !ids.has(revealFor)) || (revealed && !ids.has(revealed.id))) closeReveal();
+  }, [keyIds]);
+  useEffect(() => {
+    if (!revealed) return;
+    const timer = setTimeout(() => { revealGeneration.current++; setRevealed(null); setRevealPassword(""); }, 30000);
+    return () => clearTimeout(timer);
+  }, [revealed]);
   return <div className="tailscale-panel">
       <div className={`tailscale-overview${connected ? " connected" : ""}`}>
         <div className="tailscale-state" role="status">
@@ -143,7 +194,39 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
           <label className="field-label" htmlFor="tailscale-key">连接设备的 SSH 公钥</label>
           <textarea id="tailscale-key" rows={3} placeholder="ssh-ed25519 AAAA…" value={key} onChange={e => setKey(e.target.value)} maxLength={8192} spellCheck={false} />
           <button className="quiet-button" disabled={busy || !key.trim()} onClick={() => act("add-key", { key: key.trim() })}>添加公钥</button>
-          <div className="tailscale-keys">{(state.keys || []).map(entry => <div className="tailscale-key" key={entry}><code title={entry}>{entry}</code><button className="icon-button" disabled={busy} aria-label="移除 SSH 公钥" onClick={() => act("remove-key", { key: entry })}><Trash2 size={14} /></button></div>)}</div>
+          <div className="tailscale-keys">{sshKeys.map(entry => {
+            const fingerprint = (entry.id || "").replace(/^SHA256:/, "").slice(0, 8);
+            const label = entry.comment || `未命名公钥 · ${entry.type} · ${fingerprint}`;
+            const expanded = revealFor === entry.id, shown = revealed?.id === entry.id;
+            return <div className="tailscale-key-row" key={entry.id} title={`${entry.type} · ${entry.id}`}>
+              <div className="tailscale-key">
+                <span className="tailscale-key-label">{label}</span>
+                <span className="tailscale-key-badge">已添加</span>
+                <button className="quiet-button" aria-expanded={expanded} aria-controls={`tailnet-key-${entry.id}`} aria-label={`查看 SSH 公钥：${label}（${fingerprint}）`} onClick={() => toggleReveal(entry.id)}><Eye size={14} />查看</button>
+                <button className="icon-button" disabled={busy} aria-label={`移除 SSH 公钥：${label}（${fingerprint}）`} onClick={() => act("remove-key", { id: entry.id })}><Trash2 size={14} /></button>
+              </div>
+              {expanded && <div className="tailscale-key-reveal" id={`tailnet-key-${entry.id}`}>
+                {shown ? <>
+                  <output aria-label="SSH 公钥全文">{revealed.key}</output>
+                  <div className="tailscale-key-actions">
+                    <button className="quiet-button" onClick={() => copy(revealed.key, "已复制 SSH 公钥")}><Copy size={14} />复制</button>
+                    <button className="quiet-button" onClick={closeReveal}>隐藏</button>
+                  </div>
+                </> : <>
+                  <p className="field-help">查看公钥需要再次验证 Cage 账户密码。</p>
+                  <form onSubmit={reveal}>
+                    <label className="field-label" htmlFor={`tailnet-key-password-${entry.id}`}>Cage 账户密码</label>
+                    <input id={`tailnet-key-password-${entry.id}`} type="password" autoComplete="off" autoFocus required maxLength={1024} value={revealPassword} onChange={event => setRevealPassword(event.target.value)} />
+                    <div className="tailscale-key-actions">
+                      <button className="quiet-button" type="submit" disabled={revealBusy || !revealPassword}>查看公钥</button>
+                      <button className="quiet-button" type="button" onClick={closeReveal}>取消</button>
+                    </div>
+                  </form>
+                </>}
+                {revealError && <p className="error-message" role="alert">{revealError}</p>}
+              </div>}
+            </div>;
+          })}</div>
         </div>}
       </section>}
       {connected && state.proxy_url && <section className="tailscale-section">
