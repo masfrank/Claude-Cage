@@ -161,11 +161,11 @@ func (db *vaultData) save(entry vaultEntry) error {
 }
 
 // Reauthentication does not rotate the access epoch or enable automatic login.
-func (a *localAccount) verifyVaultPassword(password string) error {
+func (a *localAccount) reauthenticate(password, trustedDeviceHint string) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.record != nil && a.record.TrustedDevice != "" {
-		return errors.New("查看或复制密码前，请在本机的「设置 → 账户」设置密码")
+		return errors.New(trustedDeviceHint)
 	}
 	if len(a.key) != 32 {
 		return errors.New("请先解锁 Cage")
@@ -181,4 +181,8 @@ func (a *localAccount) verifyVaultPassword(password string) error {
 	}
 	a.nextAttempt = time.Time{}
 	return nil
+}
+
+func (a *localAccount) verifyVaultPassword(password string) error {
+	return a.reauthenticate(password, "查看或复制密码前，请在本机的「设置 → 账户」设置密码")
 }

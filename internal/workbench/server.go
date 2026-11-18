@@ -99,6 +99,7 @@ type Server struct {
 	op                                               sync.Mutex
 	profile, configPath, exe, origin, token, session string
 	mu                                               sync.Mutex
+	tailnetKeyMu                                     sync.Mutex
 	preferences                                      Preferences
 	jobs                                             jobManager
 	ready                                            bool

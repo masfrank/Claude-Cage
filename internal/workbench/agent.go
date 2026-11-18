@@ -116,14 +116,20 @@ func AgentOperations() []AgentOperation {
 	get("mobile.get", "Inspect phone pairing", "/api/mobile-pair")
 	post("mobile.pair", "Generate the same phone pairing invitation", "/api/mobile-pair", object(map[string]string{"admin": "string", "relay": "string"}))
 	add("mobile.remove", "Remove the same paired device", "DELETE", "/api/mobile-pair", object(nil))
-	get("tailscale.get", "Read guest private-network state", "/api/tailscale")
+	get("tailscale.get", "Read guest private-network state; SSH keys appear only as ssh_keys metadata (id, type, comment). Use tailscale.reveal-key to view the full key", "/api/tailscale")
 	for _, action := range []string{"install", "connect", "login", "disconnect", "logout", "add-key", "remove-key"} {
 		schema := object(nil)
-		if action == "add-key" || action == "remove-key" {
+		description := "Run the same Tailscale action as the workbench"
+		if action == "add-key" {
 			schema = object(map[string]string{"key": "string"})
 		}
-		post("tailscale."+action, "Run the same Tailscale action as the workbench", "/api/tailscale/"+action, schema)
+		if action == "remove-key" {
+			schema = object(map[string]string{"id": "string", "key": "string"})
+			description = "Run the same Tailscale action as the workbench; pass id or key, not both"
+		}
+		post("tailscale."+action, description, "/api/tailscale/"+action, schema)
 	}
+	post("tailscale.reveal-key", "Reveal a saved SSH public key using the same Cage account password reauthentication as the UI; the caller must keep the returned key", "/api/tailscale/reveal-key", object(map[string]string{"id": "string", "account_password": "string"}))
 	get("browser.preferences.get", "Read the browser homepage", "/api/browser/preferences")
 	post("browser.preferences.set", "Apply and persist the browser homepage with the same rollback as the UI", "/api/browser/preferences", object(map[string]string{"browser_home_url": "string"}))
 	get("browser.tabs", "Read browser tabs and state", "/api/browser/tabs")
