@@ -77,12 +77,17 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     try { await writeClipboard(text); setNotice(message); }
     catch { setNotice("复制失败，请选中文本手动复制。"); }
   };
-  const closeReveal = () => {
+  const invalidateReveal = () => {
     revealGeneration.current++;
+    revealInflight.current = 0;
+    setRevealBusy(false);
+  };
+  const closeReveal = () => {
+    invalidateReveal();
     setRevealed(null); setRevealFor(""); setRevealPassword(""); setRevealError("");
   };
   const toggleReveal = id => {
-    revealGeneration.current++;
+    invalidateReveal();
     setRevealed(null); setRevealPassword(""); setRevealError("");
     setRevealFor(current => current === id ? "" : id);
   };
@@ -112,13 +117,14 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     if (await act(logout ? "logout" : "disconnect")) { setSelected(""); setSSHOpen(false); }
   };
   useEffect(() => {
-    const clear = () => { revealGeneration.current++; setRevealed(null); setRevealPassword(""); };
+    const clear = () => { invalidateReveal(); setRevealed(null); setRevealPassword(""); };
     window.addEventListener("blur", clear);
     document.addEventListener("visibilitychange", clear);
     return () => {
       window.removeEventListener("blur", clear);
       document.removeEventListener("visibilitychange", clear);
       revealGeneration.current++;
+      revealInflight.current = 0;
     };
   }, []);
   useEffect(() => { if (!sshOpen || !connected) closeReveal(); }, [sshOpen, connected]);
@@ -130,7 +136,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   }, [keyIds]);
   useEffect(() => {
     if (!revealed) return;
-    const timer = setTimeout(() => { revealGeneration.current++; setRevealed(null); setRevealPassword(""); }, 30000);
+    const timer = setTimeout(() => { invalidateReveal(); setRevealed(null); setRevealPassword(""); }, 30000);
     return () => clearTimeout(timer);
   }, [revealed]);
   return <div className="tailscale-panel">
