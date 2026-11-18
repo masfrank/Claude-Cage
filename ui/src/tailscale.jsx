@@ -10,15 +10,12 @@ const controlOrigin = value => {
   try { return new URL(value).origin; }
   catch { return value || "Tailscale 官方服务"; }
 };
-const normalizeControlInput = value => {
-  const next = value.trim();
-  if (!next) return next;
+const controlLabel = value => value ? controlOrigin(value) : "Tailscale 官方服务";
+const isControlOrigin = value => {
   try {
-    const url = new URL(next);
-    const host = url.hostname.toLowerCase();
-    const port = url.port && url.port !== "443" ? `:${url.port}` : "";
-    return `${url.protocol}//${host}${port}`;
-  } catch { return next.toLowerCase(); }
+    const url = new URL(value);
+    return url.protocol === "https:" && Boolean(url.hostname) && (url.pathname === "/" || url.pathname === "") && !url.search && !url.hash;
+  } catch { return false; }
 };
 const unreadableMessage = "Tailscale 控制服务器设置无法读取，请重新保存控制服务器。";
 
@@ -32,7 +29,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   // recoveryError keeps a failed save from the recovery area visible: every poll
   // that still finds the settings unreadable clears `error`.
   const [unreadable, setUnreadable] = useState(""), [recoveryError, setRecoveryError] = useState("");
-  const mounted = useRef(true), inflight = useRef(false), loginRequested = useRef(false), revision = useRef(0);
+  const mounted = useRef(true), inflight = useRef(false), loginRequested = useRef(false), revision = useRef(0), switchTarget = useRef(null);
   const ready = status.ready && !status.job?.running;
   const settingsUnreadable = ready && Boolean(unreadable);
   const controlStatus = state?.control_url_status ?? "ok";
@@ -50,8 +47,20 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     NeedsMachineAuth: selfBuilt ? "登录已完成。请让控制服务器的管理员批准 Cage 设备。" : "登录已完成。请让此网络的管理员在 Tailscale 管理台批准 Cage 设备。",
     Starting: "正在连接 Tailscale，设备清单会在连接成功后自动更新。",
   };
-  const currentControlLabel = state?.control_url ? controlOrigin(state.control_url) : "Tailscale 官方服务";
-  const appliedControlLabel = state?.control_url_applied ? controlOrigin(state.control_url_applied) : "Tailscale 官方服务";
+  const currentControlLabel = controlLabel(state?.control_url);
+  const appliedControlLabel = controlLabel(state?.control_url_applied);
+  const showNotice = (text, target = null) => { switchTarget.current = target; setNotice(text); };
+  const dropStaleSwitchNotice = value => {
+    if (switchTarget.current === null) return;
+    const known = value?.installed === true && Object.prototype.hasOwnProperty.call(value, "control_url_applied");
+    const applied = known ? value.control_url_applied || "" : "";
+    const desired = value?.control_url || "";
+    const status = value?.control_url_status ?? "ok";
+    if (status !== "ok" || desired !== switchTarget.current || (known && applied !== switchTarget.current)) {
+      switchTarget.current = null;
+      setNotice("");
+    }
+  };
   const openLogin = async value => {
     loginRequested.current = false;
     setLoginError("");
@@ -66,6 +75,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
       const value = await api("/tailscale");
       if (mounted.current && current === revision.current) {
         setState(value); setError(""); setUnreadable(""); setRecoveryError("");
+        dropStaleSwitchNotice(value);
         if (loginRequested.current && value.auth_url) await openLogin(value);
         if (value.backend === "Running") loginRequested.current = false;
       }
@@ -88,11 +98,11 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   }, [ready]);
   const act = async (action, body = {}) => {
     if (busy) return;
-    setBusy(true); setError(""); setLoginError(""); setNotice(""); revision.current++;
+    setBusy(true); setError(""); setLoginError(""); showNotice(""); revision.current++;
     try {
       inflight.current = true;
       const value = await api(`/tailscale/${action}`, body);
-      if (mounted.current) { setState(value); if (action === "add-key") setKey(""); }
+      if (mounted.current) { setState(value); dropStaleSwitchNotice(value); if (action === "add-key") setKey(""); }
       return value;
     } catch (e) {
       if (!mounted.current) return;
@@ -105,10 +115,23 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   const saveControl = async (raw, { confirm = true } = {}) => {
     if (busy || !ready) return;
     const next = raw.trim();
-    if (confirm && state?.enabled && normalizeControlInput(next) !== normalizeControlInput(state.control_url || "")) {
-      if (!await onConfirm({ title: "切换控制服务器？", body: "当前私网连接会断开。每个控制服务器的设备身份分别保留，切回原服务器后无需重新登录。SSH 公钥保留。", confirm: "切换" })) return;
+    const known = state?.installed === true && Object.prototype.hasOwnProperty.call(state, "control_url_applied");
+    const applied = known ? state.control_url_applied || "" : "";
+    const desired = state?.control_url || "";
+    if (!settingsUnreadable && known && state.control_url_status === "ok" && next === desired && next === applied) {
+      showNotice(`已在使用 ${controlLabel(next)}`);
+      return state;
     }
-    setBusy(true); setError(""); setControlError(""); setRecoveryError(""); setNotice(""); revision.current++;
+    if (confirm && (!next || isControlOrigin(next))) {
+      const body = known
+        ? `目前使用的是 ${controlLabel(applied)}，是否切换为 ${controlLabel(next)}？`
+        : state?.installed === false
+          ? `Tailscale 尚未安装，目前设置为 ${controlLabel(desired)}。是否改为 ${controlLabel(next)}？安装 Tailscale 后会自动使用该服务器。`
+          : `当前设置为 ${controlLabel(desired)}，是否切换为 ${controlLabel(next)}？`;
+      const warning = state?.enabled ? "当前私网连接会断开。每个控制服务器的设备身份分别保留，切回原服务器后无需重新登录。SSH 公钥保留。" : "";
+      if (!await onConfirm({ title: "切换控制服务器？", body: body + warning, confirm: "切换" })) return;
+    }
+    setBusy(true); setError(""); setControlError(""); setRecoveryError(""); showNotice(""); revision.current++;
     let needRefresh = false;
     try {
       inflight.current = true;
@@ -117,7 +140,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
         setState(value);
         setUnreadable("");
         setControlInput(value.control_url || "");
-        setNotice(`已切换到 ${value.control_url ? controlOrigin(value.control_url) : "Tailscale 官方服务"}`);
+        showNotice(value.installed === false ? `已保存，安装 Tailscale 后将使用 ${controlLabel(next)}` : `已切换到 ${controlLabel(next)}`, next);
       }
       return value;
     } catch (e) {
@@ -129,8 +152,8 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
         setRecoveryError(e.message || "保存控制服务器失败");
         needRefresh = recovery === "tailnet-control-pending" || recovery === "tailnet-control-restored";
       }
-      else if (recovery === "tailnet-control-pending") { setError(e.message); setNotice("可再次保存以重试"); needRefresh = true; }
-      else if (recovery === "tailnet-control-restored") { setNotice("已恢复原设置"); needRefresh = true; }
+      else if (recovery === "tailnet-control-pending") { setError(e.message); showNotice("可再次保存以重试"); needRefresh = true; }
+      else if (recovery === "tailnet-control-restored") { showNotice("已恢复原设置"); needRefresh = true; }
       else if (recovery === "tailnet-control-unsupported") setError(e.message);
       else if (recovery === "tailnet-control-unreadable") { setControlOpen(true); setControlError(e.message); }
       else setError(e.message);
@@ -147,8 +170,8 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     else if (!result || result.backend === "Running") loginRequested.current = false;
   };
   const copy = async (text, message = "已复制") => {
-    try { await writeClipboard(text); setNotice(message); }
-    catch { setNotice("复制失败，请选中文本手动复制。"); }
+    try { await writeClipboard(text); showNotice(message); }
+    catch { showNotice("复制失败，请选中文本手动复制。"); }
   };
   const stop = async logout => {
     if (!await onConfirm({ title: logout ? "退出 Tailscale 登录？" : "断开 Tailscale？", body: logout ? "私网连接会中断，下次连接需要重新登录。已添加的 SSH 公钥保留。" : "正在使用的私网连接会中断，登录状态和 SSH 公钥保留。", confirm: logout ? "退出登录" : "断开连接" })) return;
@@ -160,16 +183,18 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     setControlOpen(next);
     if (next && state?.control_url) setControlInput(state.control_url);
   };
+  // The settings are unreadable in the recovery area, so there is no reliable
+  // current/target pair to describe; the repair actions post directly.
   return <div className="tailscale-panel">
       {settingsUnreadable ? <section className="tailscale-control-warning tailscale-control-recovery" role="alert" aria-label="控制服务器设置无法读取">
         <p><strong>{unreadable}</strong></p>
         <p className="field-help">重新保存控制服务器地址，或改用 Tailscale 官方服务。设置恢复后，面板会自动重新加载。</p>
         <label className="field-label" htmlFor="tailscale-control-url">自建控制服务器地址</label>
-        <div className="tailscale-connect-form"><input id="tailscale-control-url" aria-label="自建控制服务器地址" type="url" placeholder="https://headscale.example.com" value={controlInput} onChange={e => { setControlInput(e.target.value); setControlError(""); }} maxLength={1024} spellCheck={false} /><button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl(controlInput)}>保存并切换</button></div>
+        <div className="tailscale-connect-form"><input id="tailscale-control-url" aria-label="自建控制服务器地址" type="url" placeholder="https://headscale.example.com" value={controlInput} onChange={e => { setControlInput(e.target.value); setControlError(""); }} maxLength={1024} spellCheck={false} /><button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl(controlInput, { confirm: false })}>保存并切换</button></div>
         {controlError && <p className="tailscale-control-error" role="alert">{controlError}</p>}
         {recoveryError && <p className="tailscale-control-error" role="alert">{recoveryError}</p>}
         {error && <p className="tailscale-control-error" role="alert">{error}</p>}
-        <button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl("")}>改用 Tailscale 官方服务</button>
+        <button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl("", { confirm: false })}>改用 Tailscale 官方服务</button>
       </section> : <>
       <div className={`tailscale-overview${connected ? " connected" : ""}`}>
         <div className="tailscale-state" role="status">
@@ -240,7 +265,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
               {!peer.online && <p className="field-help">设备当前离线，请先在该设备上连接 Tailscale。</p>}
               <label className="field-label" htmlFor="tailnet-service-port">访问设备上的服务</label>
               <p className="field-help">填写服务端口，为 Cage 内的浏览器、数据库客户端或其他应用创建本地连接地址。</p>
-              <div className="tailscale-connect-form"><input id="tailnet-service-port" aria-label="服务端口" type="number" min="1" max="65535" inputMode="numeric" value={port} onChange={e => setPort(e.target.value)} /><button className="quiet-button" disabled={busy || !Number.isInteger(Number(port)) || Number(port) < 1 || Number(port) > 65535} onClick={async () => { if (await act("open-service", { host: peer.ip, port: Number(port) })) setNotice("本地连接地址已就绪，请在 Cage 环境内使用。"); }}>创建连接地址</button></div>
+              <div className="tailscale-connect-form"><input id="tailnet-service-port" aria-label="服务端口" type="number" min="1" max="65535" inputMode="numeric" value={port} onChange={e => setPort(e.target.value)} /><button className="quiet-button" disabled={busy || !Number.isInteger(Number(port)) || Number(port) < 1 || Number(port) > 65535} onClick={async () => { if (await act("open-service", { host: peer.ip, port: Number(port) })) showNotice("本地连接地址已就绪，请在 Cage 环境内使用。"); }}>创建连接地址</button></div>
               {(state.forwards || []).filter(entry => entry.host === peer.ip).map(entry => <div className="tailscale-forward" key={`${entry.host}:${entry.port}`}><span><strong>端口 {entry.port}</strong><code>{entry.address}</code></span><button className="icon-button" aria-label={`复制端口 ${entry.port} 的连接地址`} onClick={() => copy(entry.address, "已复制 Cage 内可用的连接地址")}><Copy size={14} /></button><button className="quiet-button" onClick={async () => { try { if (!await onOpenBrowser(`http://${entry.address}`)) setError("服务页面未能打开，请重试。"); } catch { setError("服务页面未能打开，请重试。"); } }}>打开 HTTP 页面</button></div>)}
               <label className="field-label" htmlFor="tailnet-ssh-user"><Terminal size={14} />SSH 连接</label>
               <p className="field-help">填写这台设备的系统用户名。目标设备需开启 SSH，并允许当前账号登录。</p>
