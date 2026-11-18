@@ -533,6 +533,9 @@ func (s *Server) handleControlServer(w http.ResponseWriter, r *http.Request, nex
 }
 
 func (s *Server) applySavedTailnetControl(ctx context.Context) error {
+	if s.tailnetApplySavedControl != nil {
+		return s.tailnetApplySavedControl(ctx)
+	}
 	desired, err := s.readDesiredControlURL()
 	if err != nil {
 		return err

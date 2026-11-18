@@ -3,6 +3,7 @@ package workbench
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1065,6 +1066,84 @@ func TestApplySavedTailnetControl(t *testing.T) {
 		defer cancel()
 		if err := s.applySavedTailnetControl(ctx); err == nil {
 			t.Fatal("expected timeout")
+		}
+	})
+}
+
+func TestTailnetInstallAndRefreshHooks(t *testing.T) {
+	const desired = "https://hs.example.com"
+	record := func(t *testing.T) (*Server, *[]string) {
+		t.Helper()
+		s := readyTailnet(t)
+		steps := &[]string{}
+		s.tailnetPlaceBinary = func() error {
+			*steps = append(*steps, "place")
+			return nil
+		}
+		s.tailnetApplySavedControl = func(context.Context) error {
+			*steps = append(*steps, "apply")
+			return nil
+		}
+		return s, steps
+	}
+	t.Run("refreshInstalledPlacesOnly", func(t *testing.T) {
+		s, steps := record(t)
+		s.tailnetInstalledProbe = func() (bool, error) { return true, nil }
+		if err := s.refreshInstalledTailnet(); err != nil {
+			t.Fatal(err)
+		}
+		if got := *steps; len(got) != 1 || got[0] != "place" {
+			t.Fatal(got)
+		}
+	})
+	t.Run("refreshMissingBinaryDoesNothing", func(t *testing.T) {
+		s, steps := record(t)
+		s.tailnetInstalledProbe = func() (bool, error) { return false, nil }
+		if err := s.refreshInstalledTailnet(); err != nil {
+			t.Fatal(err)
+		}
+		if got := *steps; len(got) != 0 {
+			t.Fatal(got)
+		}
+	})
+	t.Run("installPlacesThenApplies", func(t *testing.T) {
+		s, steps := record(t)
+		if err := s.installTailnet(); err != nil {
+			t.Fatal(err)
+		}
+		if got := *steps; len(got) != 2 || got[0] != "place" || got[1] != "apply" {
+			t.Fatal(got)
+		}
+	})
+	t.Run("installApplyFailureKeepsR5Message", func(t *testing.T) {
+		s, steps := record(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		s.tailnetApplySavedControl = func(context.Context) error {
+			*steps = append(*steps, "apply")
+			return errors.New("组件尚未就绪或不支持")
+		}
+		err := s.installTailnet()
+		if err == nil || !strings.Contains(err.Error(), "Tailscale 已安装，但未能切换到 "+desired+"：组件尚未就绪或不支持") || !strings.Contains(err.Error(), "连接时会再次尝试") {
+			t.Fatal(err)
+		}
+		if got := *steps; len(got) != 2 || got[0] != "place" || got[1] != "apply" {
+			t.Fatal(got)
+		}
+	})
+	t.Run("installPlaceFailureDoesNotApply", func(t *testing.T) {
+		s, steps := record(t)
+		s.tailnetPlaceBinary = func() error {
+			*steps = append(*steps, "place")
+			return errors.New("Tailscale 安装未完成，请检查客机连接后重试")
+		}
+		err := s.installTailnet()
+		if err == nil || !strings.Contains(err.Error(), "安装未完成") {
+			t.Fatal(err)
+		}
+		if got := *steps; len(got) != 1 || got[0] != "place" {
+			t.Fatal(got)
 		}
 	})
 }
