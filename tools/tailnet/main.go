@@ -102,12 +102,11 @@ func newNode(dir string) (*node, error) {
 	n := &node{dir: dir, connections: map[net.Conn]bool{}}
 	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
 	if err == nil {
-		err = json.Unmarshal(b, &n.config)
+		err = n.loadSettings(b)
 	}
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
-	n.applyPersistedControlURL()
 	return n, nil
 }
 func (n *node) save() error {

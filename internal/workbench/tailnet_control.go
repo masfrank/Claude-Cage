@@ -156,13 +156,28 @@ func (s *Server) readDesiredControlURL() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	b = bytes.TrimSpace(b)
+	if len(b) == 0 || b[0] != '{' {
+		return "", errTailnetUnreadable
+	}
 	var file struct {
-		ControlURL string `json:"control_url"`
+		ControlURL json.RawMessage `json:"control_url"`
 	}
 	if json.Unmarshal(b, &file) != nil {
 		return "", errTailnetUnreadable
 	}
-	next, err := normalizeControlURL(file.ControlURL)
+	raw := bytes.TrimSpace(file.ControlURL)
+	if len(raw) == 0 {
+		return "", nil
+	}
+	if bytes.Equal(raw, []byte("null")) {
+		return "", errTailnetUnreadable
+	}
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		return "", errTailnetUnreadable
+	}
+	next, err := normalizeControlURL(text)
 	if err != nil {
 		return "", errTailnetUnreadable
 	}

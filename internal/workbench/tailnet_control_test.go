@@ -466,6 +466,75 @@ func TestTailnetAdmissionAndUnreadable(t *testing.T) {
 	}
 }
 
+func TestTailnetUnreadableControlURLDoesNotReachGuest(t *testing.T) {
+	s := readyTailnet(t)
+	g := &recordedGuest{fn: func(req map[string]any, n int) any {
+		if u, ok := req["control_url"].(string); ok {
+			return supportedState(map[string]any{"control_url": u})
+		}
+		return supportedState(nil)
+	}}
+	g.attach(t, s)
+	for _, body := range []string{
+		`{"control_url":null}`,
+		`{"control_url":1}`,
+		`{`,
+		`null`,
+		`1`,
+	} {
+		if err := os.WriteFile(s.tailscalePath(), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		before := len(g.actions())
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		if w.Code != 500 || w.Header().Get("X-Cage-Recovery") != tailnetControlUnreadable || !strings.Contains(w.Body.String(), errTailnetUnreadable.Error()) || len(g.actions()) != before {
+			t.Fatalf("%s GET: %d %s %q %v", body, w.Code, w.Header().Get("X-Cage-Recovery"), w.Body.String(), g.actions())
+		}
+		w = request(s, "POST", "/api/tailscale/connect", s.origin, "{}", true)
+		if w.Code != 500 || w.Header().Get("X-Cage-Recovery") != tailnetControlUnreadable || len(g.actions()) != before {
+			t.Fatalf("%s POST: %d %s %q %v", body, w.Code, w.Header().Get("X-Cage-Recovery"), w.Body.String(), g.actions())
+		}
+	}
+	if err := os.WriteFile(s.tailscalePath(), []byte(`{"control_url":null}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := request(s, "POST", "/api/tailscale/control-server", s.origin, `{"control_url":"https://hs.example.com"}`, true)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	desired, err := s.readDesiredControlURL()
+	if err != nil || desired != "https://hs.example.com" {
+		t.Fatal(desired, err)
+	}
+	w = request(s, "GET", "/api/tailscale", s.origin, "", true)
+	if w.Code != 200 {
+		t.Fatal(w.Code, w.Body.String())
+	}
+	if got := g.actions(); len(got) < 2 || got[len(got)-1] != "status" {
+		t.Fatal(got)
+	}
+}
+
+func TestTailnetMissingOrEmptyControlURLIsOfficial(t *testing.T) {
+	s := readyTailnet(t)
+	g := &recordedGuest{fn: func(map[string]any, int) any { return supportedState(nil) }}
+	g.attach(t, s)
+	for _, body := range []string{`{}`, `{"control_url":""}`} {
+		if err := os.WriteFile(s.tailscalePath(), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		before := len(g.actions())
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		if w.Code != 200 || len(g.actions()) != before+1 {
+			t.Fatalf("%s: %d %s %v", body, w.Code, w.Body.String(), g.actions())
+		}
+		desired, err := s.readDesiredControlURL()
+		if err != nil || desired != "" {
+			t.Fatal(desired, err)
+		}
+	}
+}
+
 func TestTailnetFilePermissions(t *testing.T) {
 	s := readyTailnet(t)
 	g := &recordedGuest{fn: func(map[string]any, int) any {

@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"net"
 	"net/url"
@@ -14,6 +16,12 @@ import (
 )
 
 const invalidPersistedControlURL = "已保存的控制服务器地址无效，请在 Tailscale 面板重新保存控制服务器"
+
+// nonStringControlURLMarker is snapshot control_url when settings.json has JSON
+// null or a non-string. Decoding those into a string would yield "" and look
+// like the official service; this marker is not a valid URL, so the host sees
+// mismatch until useControlURL writes a real string.
+const nonStringControlURLMarker = "invalid"
 
 func inheritedTailnetEnv() []string {
 	return []string{"TS_AUTHKEY", "TS_AUTH_KEY", "TS_CLIENT_SECRET", "TS_CLIENT_ID", "TSNET_FORCE_LOGIN", "TS_CONTROL_URL"}
@@ -85,17 +93,50 @@ func (n *node) stateDir() string {
 	return filepath.Join(n.dir, "servers", hex.EncodeToString(sum[:]))
 }
 
-func (n *node) applyPersistedControlURL() {
-	if n.config.ControlURL == "" {
+func (n *node) loadSettings(b []byte) error {
+	var file struct {
+		Enabled    bool            `json:"enabled"`
+		Keys       []string        `json:"keys"`
+		ControlURL json.RawMessage `json:"control_url"`
+	}
+	if err := json.Unmarshal(b, &file); err != nil {
+		return err
+	}
+	n.config.Enabled = file.Enabled
+	n.config.Keys = file.Keys
+	n.applyPersistedControlURL(file.ControlURL)
+	return nil
+}
+
+func (n *node) applyPersistedControlURL(raw json.RawMessage) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
 		return
 	}
-	normalized, err := normalizeControlURL(n.config.ControlURL)
+	if bytes.Equal(raw, []byte("null")) {
+		n.markInvalidPersistedControlURL(nonStringControlURLMarker)
+		return
+	}
+	var text string
+	if json.Unmarshal(raw, &text) != nil {
+		n.markInvalidPersistedControlURL(nonStringControlURLMarker)
+		return
+	}
+	if text == "" {
+		return
+	}
+	normalized, err := normalizeControlURL(text)
 	if err != nil {
-		n.invalidControl = true
-		n.startError = invalidPersistedControlURL
+		n.markInvalidPersistedControlURL(text)
 		return
 	}
 	n.config.ControlURL = normalized
+}
+
+func (n *node) markInvalidPersistedControlURL(reported string) {
+	n.config.ControlURL = reported
+	n.invalidControl = true
+	n.startError = invalidPersistedControlURL
 }
 
 func (n *node) useControlURL(raw string) error {

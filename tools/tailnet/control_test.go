@@ -183,6 +183,108 @@ func TestPersistedInvalidControlURLDoesNotStart(t *testing.T) {
 	}
 }
 
+func assertPersistedControlRejected(t *testing.T, n *node, reported string) {
+	t.Helper()
+	if !n.config.Enabled || n.config.ControlURL != reported || !n.invalidControl || n.startError == "" {
+		t.Fatalf("%+v invalid=%v startError=%q", n.config, n.invalidControl, n.startError)
+	}
+	if err := n.start(); err == nil || n.server != nil {
+		t.Fatalf("started invalid control url: server=%v err=%v startError=%q", n.server, err, n.startError)
+	}
+	if _, err := os.Stat(filepath.Join(n.dir, "servers")); !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(n.dir, "tailscaled.state")); !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	st, err := n.snapshot(context.Background())
+	if err != nil || st.ControlURL != reported {
+		t.Fatalf("%+v %v", st, err)
+	}
+	if !strings.Contains(strings.Join(st.Health, "\n"), "已保存的控制服务器地址无效") {
+		t.Fatal(st.Health)
+	}
+}
+
+func TestPersistedNullAndNonStringControlURLDoesNotStart(t *testing.T) {
+	for _, body := range []string{
+		`{"enabled":true,"keys":["ssh-ed25519 AAAA"],"control_url":null}`,
+		`{"enabled":true,"keys":["ssh-ed25519 AAAA"],"control_url":1}`,
+		`{"enabled":true,"keys":["ssh-ed25519 AAAA"],"control_url":true}`,
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		n, err := newNode(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(n.config.Keys) != 1 || n.config.Keys[0] != "ssh-ed25519 AAAA" {
+			t.Fatalf("%+v", n.config.Keys)
+		}
+		assertPersistedControlRejected(t, n, nonStringControlURLMarker)
+		next := "https://hs.example.com"
+		sum := sha256.Sum256([]byte(next))
+		if err := os.MkdirAll(filepath.Join(n.dir, "servers"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(n.dir, "servers", hex.EncodeToString(sum[:])), []byte("blocked"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := n.useControlURL(next); err != nil {
+			t.Fatal(err)
+		}
+		if n.config.ControlURL != next || n.invalidControl || n.server != nil {
+			t.Fatalf("%+v invalid=%v server=%v", n.config, n.invalidControl, n.server)
+		}
+		saved, err := os.ReadFile(filepath.Join(dir, "settings.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var file struct {
+			Enabled    bool    `json:"enabled"`
+			ControlURL *string `json:"control_url"`
+		}
+		if json.Unmarshal(saved, &file) != nil || !file.Enabled || file.ControlURL == nil || *file.ControlURL != next {
+			t.Fatal(string(saved))
+		}
+		st, err := n.snapshot(context.Background())
+		if err != nil || st.ControlURL != next {
+			t.Fatalf("%+v %v", st, err)
+		}
+		if strings.Contains(strings.Join(st.Health, "\n"), "已保存的控制服务器地址无效") {
+			t.Fatal(st.Health)
+		}
+	}
+}
+
+func TestPersistedMissingOrEmptyControlURLIsOfficial(t *testing.T) {
+	for _, body := range []string{
+		`{"enabled":true}`,
+		`{"enabled":true,"control_url":""}`,
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "settings.json"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		n, err := newNode(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !n.config.Enabled || n.config.ControlURL != "" || n.invalidControl || n.startError != "" {
+			t.Fatalf("%+v invalid=%v startError=%q", n.config, n.invalidControl, n.startError)
+		}
+		if n.stateDir() != n.dir {
+			t.Fatal(n.stateDir())
+		}
+		st, err := n.snapshot(context.Background())
+		if err != nil || st.ControlURL != "" || strings.Contains(strings.Join(st.Health, "\n"), "已保存的控制服务器地址无效") {
+			t.Fatalf("%+v %v", st, err)
+		}
+	}
+}
+
 func TestPersistedControlURLIsNormalized(t *testing.T) {
 	for _, c := range []struct{ raw, want string }{
 		{"HTTPS://Headscale.Example.COM:443/", "https://headscale.example.com"},
