@@ -266,12 +266,29 @@ func classifyTailnetBridge(result map[string]json.RawMessage) (class, applied st
 	return bridgeStranded, applied
 }
 
-func deriveControlURLStatus(class, desired, applied string) string {
+func tailnetEnabledBackend(result map[string]json.RawMessage) (enabled bool, backend string) {
+	_ = json.Unmarshal(result["enabled"], &enabled)
+	_ = json.Unmarshal(result["backend"], &backend)
+	return
+}
+
+func validAppliedControlURL(applied string) bool {
+	if applied == "" {
+		return true
+	}
+	normalized, err := normalizeControlURL(applied)
+	return err == nil && normalized == applied
+}
+
+func deriveControlURLStatus(class, desired, applied string, enabled bool, backend string) string {
 	switch class {
 	case bridgeNotInstalled:
 		return "ok"
 	case bridgeSupported:
 		if applied == desired {
+			return "ok"
+		}
+		if !enabled && backend == "Stopped" && validAppliedControlURL(applied) {
 			return "ok"
 		}
 		return "mismatch"
@@ -290,14 +307,20 @@ func deriveControlURLStatus(class, desired, applied string) string {
 	}
 }
 
+func controlURLView(result map[string]json.RawMessage, desired string) (class, applied, status string) {
+	class, applied = classifyTailnetBridge(result)
+	enabled, backend := tailnetEnabledBackend(result)
+	status = deriveControlURLStatus(class, desired, applied, enabled, backend)
+	return
+}
+
 func jsonRaw(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
 }
 
 // shapeTailnetState 只应由 replyTailnetState 调用。
-func shapeTailnetState(result map[string]json.RawMessage, desired, class, applied string) map[string]json.RawMessage {
-	status := deriveControlURLStatus(class, desired, applied)
+func shapeTailnetState(result map[string]json.RawMessage, desired, class, applied, status string) map[string]json.RawMessage {
 	if status != "ok" {
 		delete(result, "auth_url")
 		delete(result, "proxy_url")
@@ -326,8 +349,7 @@ func writeTailnetState(w http.ResponseWriter, result map[string]json.RawMessage)
 }
 
 func (s *Server) replyTailnetState(w http.ResponseWriter, result map[string]json.RawMessage, desired string) {
-	class, applied := classifyTailnetBridge(result)
-	status := deriveControlURLStatus(class, desired, applied)
+	class, applied, status := controlURLView(result, desired)
 	var authURL string
 	_ = json.Unmarshal(result["auth_url"], &authURL)
 	if status == "ok" && authURL != "" {
@@ -341,7 +363,7 @@ func (s *Server) replyTailnetState(w http.ResponseWriter, result map[string]json
 			return
 		}
 	}
-	writeTailnetState(w, shapeTailnetState(result, desired, class, applied))
+	writeTailnetState(w, shapeTailnetState(result, desired, class, applied, status))
 }
 
 func (s *Server) finishTailnet(w http.ResponseWriter, data []byte, err error, desired string) {
@@ -433,7 +455,7 @@ func (s *Server) handleControlServer(w http.ResponseWriter, r *http.Request, nex
 			tailnetControlError(w, 502, tailnetControlPending, "控制服务器切换结果待核对，请再次保存以重试。")
 			return
 		}
-		class, applied := classifyTailnetBridge(result)
+		class, applied, _ := controlURLView(result, next)
 		switch class {
 		case bridgeNotInstalled:
 			if err := s.writeDesiredControlURL(next); err != nil {
@@ -508,4 +530,53 @@ func (s *Server) handleControlServer(w http.ResponseWriter, r *http.Request, nex
 		}
 		s.replyTailnetState(w, result, next)
 	})
+}
+
+func (s *Server) applySavedTailnetControl(ctx context.Context) error {
+	desired, err := s.readDesiredControlURL()
+	if err != nil {
+		return err
+	}
+	if desired == "" {
+		return nil
+	}
+	s.tailnetMu.Lock()
+	defer s.tailnetMu.Unlock()
+	s.mu.Lock()
+	token := s.credentials.Token
+	s.mu.Unlock()
+	data, err := s.tailnetGuest(ctx, token, map[string]string{"action": "status"})
+	if err != nil {
+		return err
+	}
+	result, err := decodeTailnetState(data)
+	if err != nil {
+		return err
+	}
+	if reason := tailnetErrorMessage(result); reason != "" {
+		return errors.New(reason)
+	}
+	class, applied := classifyTailnetBridge(result)
+	if class != bridgeSupported {
+		return errors.New("组件尚未就绪或不支持")
+	}
+	if applied == desired {
+		return nil
+	}
+	data, err = s.tailnetGuest(ctx, token, map[string]string{"action": "control-server", "control_url": desired})
+	if err != nil {
+		return err
+	}
+	result, err = decodeTailnetState(data)
+	if err != nil {
+		return err
+	}
+	if reason := tailnetErrorMessage(result); reason != "" {
+		return errors.New(reason)
+	}
+	_, applied = classifyTailnetBridge(result)
+	if applied != desired {
+		return errors.New("控制服务器未切换到已保存的地址")
+	}
+	return nil
 }

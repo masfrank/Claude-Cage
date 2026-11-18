@@ -1,6 +1,7 @@
 package workbench
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -802,6 +803,268 @@ func TestTailnetControlServerAuthURL(t *testing.T) {
 		}
 		if strings.Contains(w.Body.String(), "evil.test") {
 			t.Fatal(w.Body.String())
+		}
+	})
+}
+
+func TestTailnetStoppedControlURLStatus(t *testing.T) {
+	const desired = "https://hs.example.com"
+	t.Run("stoppedOfficialAppliedIsOK", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return supportedState(map[string]any{
+				"control_url": "",
+				"enabled":     false,
+				"backend":     "Stopped",
+				"peers":       []any{map[string]any{"name": "n", "ip": "100.64.0.1"}},
+				"ips":         []any{"100.64.0.2"},
+				"tailnet":     "work.test",
+			})
+		}}
+		g.attach(t, s)
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		body := decodeTailnetBody(t, w)
+		peers, _ := body["peers"].([]any)
+		if w.Code != 200 || body["control_url_status"] != "ok" || body["control_url_applied"] != "" || body["tailnet"] != "work.test" || len(peers) != 1 {
+			t.Fatal(w.Code, body)
+		}
+	})
+	t.Run("disabledRunningRemainsMismatch", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return supportedState(map[string]any{
+				"control_url": "",
+				"enabled":     false,
+				"backend":     "Running",
+				"auth_url":    "https://login.tailscale.com/a/test",
+				"tailnet":     "work.test",
+				"peers":       []any{map[string]any{"name": "n", "ip": "100.64.0.1"}},
+			})
+		}}
+		g.attach(t, s)
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		body := decodeTailnetBody(t, w)
+		peers, _ := body["peers"].([]any)
+		if w.Code != 200 || body["control_url_status"] != "mismatch" || body["auth_url"] != nil || body["tailnet"] != nil || len(peers) != 0 {
+			t.Fatal(w.Code, body)
+		}
+	})
+	t.Run("enabledStoppedRemainsMismatch", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return supportedState(map[string]any{
+				"control_url": "",
+				"enabled":     true,
+				"backend":     "Stopped",
+				"auth_url":    "https://login.tailscale.com/a/test",
+				"tailnet":     "work.test",
+				"peers":       []any{map[string]any{"name": "n"}},
+			})
+		}}
+		g.attach(t, s)
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		body := decodeTailnetBody(t, w)
+		peers, _ := body["peers"].([]any)
+		if w.Code != 200 || body["control_url_status"] != "mismatch" || body["auth_url"] != nil || body["tailnet"] != nil || len(peers) != 0 {
+			t.Fatal(w.Code, body)
+		}
+	})
+	t.Run("invalidAppliedStoppedRemainsMismatch", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return supportedState(map[string]any{
+				"control_url": "invalid",
+				"enabled":     false,
+				"backend":     "Stopped",
+				"auth_url":    "https://login.tailscale.com/a/test",
+				"peers":       []any{map[string]any{"name": "n"}},
+			})
+		}}
+		g.attach(t, s)
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		body := decodeTailnetBody(t, w)
+		peers, _ := body["peers"].([]any)
+		if w.Code != 200 || body["control_url_status"] != "mismatch" || body["control_url_applied"] != "invalid" || body["auth_url"] != nil || len(peers) != 0 {
+			t.Fatal(w.Code, body)
+		}
+	})
+	t.Run("stoppedOKRejectsOfficialAuthURL", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return supportedState(map[string]any{
+				"control_url": "",
+				"enabled":     false,
+				"backend":     "Stopped",
+				"auth_url":    "https://login.tailscale.com/a/test",
+			})
+		}}
+		g.attach(t, s)
+		w := request(s, "GET", "/api/tailscale", s.origin, "", true)
+		if w.Code != 502 || w.Header().Get("X-Cage-Recovery") != tailnetAuthURLInvalid {
+			t.Fatal(w.Code, w.Header().Get("X-Cage-Recovery"), w.Body.String())
+		}
+		if strings.Contains(w.Body.String(), "login.tailscale.com") {
+			t.Fatal(w.Body.String())
+		}
+	})
+}
+
+func TestApplySavedTailnetControl(t *testing.T) {
+	const desired = "https://hs.example.com"
+	apply := func(t *testing.T, s *Server, timeout time.Duration) error {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(s.lifetimeContext(), timeout)
+		defer cancel()
+		return s.applySavedTailnetControl(ctx)
+	}
+	t.Run("emptyDesiredNoRequest", func(t *testing.T) {
+		s := readyTailnet(t)
+		g := &recordedGuest{fn: func(map[string]any, int) any { return supportedState(nil) }}
+		g.attach(t, s)
+		if err := apply(t, s, 5*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		if got := g.actions(); len(got) != 0 {
+			t.Fatal(got)
+		}
+	})
+	t.Run("supportedMismatchSendsControlServer", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(req map[string]any, n int) any {
+			if req["action"] == "control-server" {
+				return supportedState(map[string]any{"control_url": desired, "enabled": false, "backend": "Stopped"})
+			}
+			return supportedState(map[string]any{"control_url": "", "enabled": false, "backend": "Stopped"})
+		}}
+		g.attach(t, s)
+		if err := apply(t, s, 5*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		if got := g.actions(); len(got) != 2 || got[0] != "status" || got[1] != "control-server" {
+			t.Fatal(got)
+		}
+		if g.nth(1)["control_url"] != desired {
+			t.Fatal(g.nth(1))
+		}
+	})
+	t.Run("appliedEqualsDesiredNoSwitch", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return supportedState(map[string]any{"control_url": desired})
+		}}
+		g.attach(t, s)
+		if err := apply(t, s, 5*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		if got := g.actions(); len(got) != 1 || got[0] != "status" {
+			t.Fatal(got)
+		}
+	})
+	t.Run("legacyError", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return map[string]any{"installed": true, "backend": "Running"}
+		}}
+		g.attach(t, s)
+		if err := apply(t, s, 5*time.Second); err == nil || !strings.Contains(err.Error(), "尚未就绪或不支持") {
+			t.Fatal(err)
+		}
+		if got := g.actions(); len(got) != 1 || got[0] != "status" {
+			t.Fatal(got)
+		}
+	})
+	t.Run("notInstalledError", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return map[string]any{"installed": false, "enabled": false, "backend": "NotInstalled"}
+		}}
+		g.attach(t, s)
+		if err := apply(t, s, 5*time.Second); err == nil || !strings.Contains(err.Error(), "尚未就绪或不支持") {
+			t.Fatal(err)
+		}
+	})
+	t.Run("strandedError", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return map[string]any{"installed": true, "backend": "Running", "control_url": desired}
+		}}
+		g.attach(t, s)
+		if err := apply(t, s, 5*time.Second); err == nil || !strings.Contains(err.Error(), "尚未就绪或不支持") {
+			t.Fatal(err)
+		}
+	})
+	t.Run("tailnetError", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(map[string]any, int) any {
+			return map[string]any{"tailnet_error": "boom"}
+		}}
+		g.attach(t, s)
+		if err := apply(t, s, 5*time.Second); err == nil || err.Error() != "boom" {
+			t.Fatal(err)
+		}
+	})
+	t.Run("controlServerStillMismatch", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{fn: func(req map[string]any, n int) any {
+			return supportedState(map[string]any{"control_url": ""})
+		}}
+		g.attach(t, s)
+		if err := apply(t, s, 5*time.Second); err == nil || !strings.Contains(err.Error(), "未切换到已保存的地址") {
+			t.Fatal(err)
+		}
+		if got := g.actions(); len(got) != 2 || got[1] != "control-server" {
+			t.Fatal(got)
+		}
+	})
+	t.Run("contextTimeout", func(t *testing.T) {
+		s := readyTailnet(t)
+		if err := s.writeDesiredControlURL(desired); err != nil {
+			t.Fatal(err)
+		}
+		g := &recordedGuest{delay: 200 * time.Millisecond, fn: func(map[string]any, int) any {
+			return supportedState(nil)
+		}}
+		g.attach(t, s)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		if err := s.applySavedTailnetControl(ctx); err == nil {
+			t.Fatal("expected timeout")
 		}
 	})
 }

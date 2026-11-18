@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"github.com/sylvinus/agent-vm/internal/tailnetassets"
 	"io"
 	"strings"
@@ -69,6 +70,15 @@ func (s *Server) installTailnet() error {
 	s.setMessage("正在安装 Tailscale，已有终端和浏览器保持运行…")
 	if err := cmd.Run(); err != nil {
 		return errors.New("Tailscale 安装未完成，请检查客机连接后重试")
+	}
+	applyCtx, applyCancel := context.WithTimeout(s.operationContext(), 30*time.Second)
+	defer applyCancel()
+	if err := s.applySavedTailnetControl(applyCtx); err != nil {
+		desired, readErr := s.readDesiredControlURL()
+		if readErr != nil || desired == "" {
+			desired = "已保存的控制服务器"
+		}
+		return fmt.Errorf("Tailscale 已安装，但未能切换到 %s：%v。连接时会再次尝试，也可在 Tailscale 面板重新保存控制服务器。", desired, err)
 	}
 	return nil
 }
