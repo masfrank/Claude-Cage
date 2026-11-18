@@ -91,6 +91,10 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     setRevealed(null); setRevealPassword(""); setRevealError("");
     setRevealFor(current => current === id ? "" : id);
   };
+  const removeKey = async id => {
+    if (revealFor === id || revealed?.id === id) closeReveal();
+    await act("remove-key", { id });
+  };
   const reveal = async event => {
     event.preventDefault();
     const id = revealFor;
@@ -213,7 +217,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
                 <span className="tailscale-key-label">{label}</span>
                 <span className="tailscale-key-badge">已添加</span>
                 <button className="quiet-button" aria-expanded={expanded} aria-controls={`tailnet-key-${entry.id}`} aria-label={`查看 SSH 公钥：${label}（${fingerprint}）`} onClick={() => toggleReveal(entry.id)}><Eye size={14} />查看</button>
-                <button className="icon-button" disabled={busy} aria-label={`移除 SSH 公钥：${label}（${fingerprint}）`} onClick={() => act("remove-key", { id: entry.id })}><Trash2 size={14} /></button>
+                <button className="icon-button" disabled={busy} aria-label={`移除 SSH 公钥：${label}（${fingerprint}）`} onClick={() => removeKey(entry.id)}><Trash2 size={14} /></button>
               </div>
               {expanded && <div className="tailscale-key-reveal" id={`tailnet-key-${entry.id}`}>
                 {shown ? <>

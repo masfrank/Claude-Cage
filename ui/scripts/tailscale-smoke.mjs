@@ -12,6 +12,7 @@ const parseFixtureKey = line => {
   return { id: fixtureIds[blob] || `SHA256:${blob.replace(/[^A-Za-z0-9]/g, "").padEnd(43, "0").slice(0, 43)}`, type, comment: rest.join(" "), key: line.trim() };
 };
 let keys = [], removeBodies = [], revealGate = null, revealArrived = null, revealRelease = null, revealDelivered = null;
+let removeGate = null, removeArrived = null, removeRelease = null, removeDelivered = null;
 const maskedKeys = () => keys.map(({ id, type, comment }) => ({ id, type, comment }));
 const holdNextReveal = () => {
   const arrived = new Promise(resolve => { revealArrived = resolve; });
@@ -20,6 +21,13 @@ const holdNextReveal = () => {
   return { arrived, delivered };
 };
 const releaseHeldReveal = () => { revealGate = null; revealRelease?.(); };
+const holdNextRemove = () => {
+  const arrived = new Promise(resolve => { removeArrived = resolve; });
+  const delivered = new Promise(resolve => { removeDelivered = resolve; });
+  removeGate = new Promise(resolve => { removeRelease = resolve; });
+  return { arrived, delivered };
+};
+const releaseHeldRemove = () => { removeGate = null; removeRelease?.(); };
 let tail = { installed: true, version: "1.104.5", enabled: false, backend: "Stopped", ips: [], peers: [], ssh_keys: [], forwards: [], user: "cage", ssh_port: 22 };
 const { browser, page, state, errors } = await createWorkbench({ beforeNavigate: (_page, fixture) => { fixture.status.ready = fixture.status.vm_running = true; }, nativeRequest: body => { if (body.action === "clipboardWrite") { copied = body.text; return true; } } });
 const checks = [];
@@ -39,7 +47,13 @@ try {
       const entry = parseFixtureKey(body.key);
       keys = [...keys.filter(item => item.id !== entry.id), entry];
     }
-    if (action === "remove-key") { removeBodies.push(body); keys = keys.filter(item => body.id ? item.id !== body.id : item.key !== body.key); }
+    if (action === "remove-key") {
+      removeBodies.push(body);
+      const held = Boolean(removeGate);
+      if (held) { const gate = removeGate; removeGate = null; removeArrived?.(); removeArrived = null; await gate; }
+      keys = keys.filter(item => body.id ? item.id !== body.id : item.key !== body.key);
+      if (held) { removeDelivered?.(); removeDelivered = null; }
+    }
     if (action === "reveal-key") {
       const held = Boolean(revealGate);
       if (held) { const gate = revealGate; revealGate = null; revealArrived?.(); revealArrived = null; await gate; }
@@ -288,10 +302,28 @@ try {
   await page.clock.fastForward(30000); await keyOutput.waitFor({ state: "hidden" });
   await page.clock.resume();
   checks.push("revealed key hides after 30 seconds");
+  await ensureClosed();
+  await viewLocal.click(); await password().fill("correct-password");
+  await panel.getByRole("button", { name: "查看公钥", exact: true }).click(); await keyOutput.waitFor();
+  await panel.getByRole("button", { name: "移除 SSH 公钥：未命名公钥 · ssh-ed25519 · bbbbbbbb（bbbbbbbb）", exact: true }).click();
+  await viewAnon.waitFor({ state: "hidden" });
+  assert.equal(await keyOutput.innerText(), "ssh-ed25519 AAAAFixtureLocal local");
+  assert.equal(await viewLocal.getAttribute("aria-expanded"), "true");
+  checks.push("removing another key keeps the displayed full key unchanged");
+  const heldRemove = holdNextRemove();
   await panel.getByRole("button", { name: "移除 SSH 公钥：local（aaaaaaaa）", exact: true }).click();
+  await heldRemove.arrived;
+  assert.equal(await page.locator('output[aria-label="SSH 公钥全文"]').count(), 0);
+  assert.equal(await viewLocal.getAttribute("aria-expanded"), "false");
+  assert.ok(!(await page.evaluate(() => document.body.innerHTML)).includes("AAAAFixture"));
+  await page.evaluate(() => { window.__seenKeyOutputs = []; });
+  releaseHeldRemove();
+  await heldRemove.delivered;
   await viewLocal.waitFor({ state: "hidden" });
+  assert.equal(await page.locator('output[aria-label="SSH 公钥全文"]').count(), 0);
+  assert.deepEqual(await page.evaluate(() => window.__seenKeyOutputs), []);
   assert.deepEqual(removeBodies.at(-1), { id: fixtureIds.AAAAFixtureLocal });
-  checks.push("remove sends the key id; the remaining list stays masked");
+  checks.push("removing a displayed key hides it before the response and keeps it hidden after the list updates");
   await page.getByRole("button", { name: "工作台", exact: true }).click(); await panel.waitFor({ state: "hidden" });
   await open.click(); await panel.getByRole("button", { name: "断开连接", exact: true }).click();
   await page.getByRole("dialog", { name: "断开 Tailscale？", exact: true }).getByRole("button", { name: "取消", exact: true }).click(); assert.equal(tail.enabled, true);
