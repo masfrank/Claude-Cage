@@ -52,6 +52,12 @@
 .tailscale-notice { display: flex; gap: 6px; align-items: center; font-size: 12px; margin: 0; color: var(--accent); }
 .tailscale-health { border-left: 2px solid var(--accent); padding: 0 12px; font-size: 12px; }
 .tailscale-health p { margin: 6px 0 0; overflow-wrap: anywhere; }
+.tailscale-control-warning { border-left: 2px solid var(--danger); padding: 0 12px; font-size: 12px; line-height: 1.7; display: flex; flex-direction: column; gap: 10px; }
+.tailscale-control-warning p { margin: 0; overflow-wrap: anywhere; }
+.tailscale-control-warning .quiet-button { align-self: flex-start; }
+.tailscale-control-current { color: var(--ink); font-size: 12px; margin: 0; }
+.tailscale-control-current strong { font-weight: 600; overflow-wrap: anywhere; }
+.tailscale-control-error { margin: 0; font-size: 12px; line-height: 1.6; color: var(--danger); }
 @container (max-width: 600px) {
   .tailscale-panel { gap: 16px; }
   .tailscale-peer-row { flex-wrap: wrap; gap: 9px; }

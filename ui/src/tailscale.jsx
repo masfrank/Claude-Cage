@@ -1,17 +1,25 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Check, ChevronDown, Copy, ExternalLink, KeyRound, LoaderCircle, Monitor, Network, RefreshCw, Search, Smartphone, Terminal, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Copy, ExternalLink, KeyRound, LoaderCircle, Monitor, Network, RefreshCw, Search, Server, Smartphone, Terminal, Trash2 } from "lucide-react";
 import { api, writeClipboard } from "./api";
 import "./tailscale.css";
 
 const labels = { Running: "已连接", NeedsLogin: "等待登录", NeedsMachineAuth: "等待管理员批准", Starting: "正在连接", Stopped: "已断开", NotInstalled: "尚未安装" };
-const descriptions = {
-  Stopped: "登录 Tailscale，让 Cage 加入你的私网。其他设备加入同一网络后，会显示在这里。",
-  NeedsLogin: "在内置浏览器中登录并授权当前设备。",
-  NeedsMachineAuth: "登录已完成。请让此网络的管理员在 Tailscale 管理台批准 Cage 设备。",
-  Starting: "正在连接 Tailscale，设备清单会在连接成功后自动更新。",
-};
 const deviceName = peer => peer.hostname || peer.name?.split(".")[0] || peer.ip;
 function DeviceIcon({ os }) { return ["android", "iOS"].includes(os) ? <Smartphone size={20} /> : <Monitor size={20} />; }
+const controlOrigin = value => {
+  try { return new URL(value).origin; }
+  catch { return value || "Tailscale 官方服务"; }
+};
+const normalizeControlInput = value => {
+  const next = value.trim();
+  if (!next) return next;
+  try {
+    const url = new URL(next);
+    const host = url.hostname.toLowerCase();
+    const port = url.port && url.port !== "443" ? `:${url.port}` : "";
+    return `${url.protocol}//${host}${port}`;
+  } catch { return next.toLowerCase(); }
+};
 
 export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, onConfirm }) {
   const [state, setState] = useState(null), [error, setError] = useState(""), [busy, setBusy] = useState(false);
@@ -19,12 +27,26 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   const [key, setKey] = useState(""), [notice, setNotice] = useState(""), [query, setQuery] = useState("");
   const [sshOpen, setSSHOpen] = useState(false), [selected, setSelected] = useState(""), [username, setUsername] = useState("");
   const [port, setPort] = useState("80"), [appsOpen, setAppsOpen] = useState(false);
+  const [controlOpen, setControlOpen] = useState(false), [controlInput, setControlInput] = useState(""), [controlError, setControlError] = useState("");
   const mounted = useRef(true), inflight = useRef(false), loginRequested = useRef(false), revision = useRef(0);
   const ready = status.ready && !status.job?.running;
-  const connected = ready && state?.backend === "Running";
+  const controlStatus = state?.control_url_status ?? "ok";
+  const isUnsupported = controlStatus === "unsupported";
+  const isMismatch = controlStatus === "mismatch";
+  const controlBlocked = isUnsupported || isMismatch;
+  const selfBuilt = Boolean(state?.control_url);
+  const connected = ready && state?.backend === "Running" && controlStatus === "ok";
   const address = state?.ips?.find(ip => !ip.includes(":"));
   const peers = [...(state?.peers || [])].sort((a, b) => Number(b.online) - Number(a.online) || deviceName(a).localeCompare(deviceName(b)));
   const visible = peers.filter(peer => [deviceName(peer), peer.name, peer.ip, peer.os].some(value => value?.toLowerCase().includes(query.trim().toLowerCase())));
+  const descriptions = {
+    Stopped: selfBuilt ? "连接后，Cage 会通过自建控制服务器加入你的私网。" : "登录 Tailscale，让 Cage 加入你的私网。其他设备加入同一网络后，会显示在这里。",
+    NeedsLogin: selfBuilt ? "在内置浏览器中打开控制服务器的登录页面，完成登录，或等待管理员注册此设备。" : "在内置浏览器中登录并授权当前设备。",
+    NeedsMachineAuth: selfBuilt ? "登录已完成。请让控制服务器的管理员批准 Cage 设备。" : "登录已完成。请让此网络的管理员在 Tailscale 管理台批准 Cage 设备。",
+    Starting: "正在连接 Tailscale，设备清单会在连接成功后自动更新。",
+  };
+  const currentControlLabel = state?.control_url ? controlOrigin(state.control_url) : "Tailscale 官方服务";
+  const appliedControlLabel = state?.control_url_applied ? controlOrigin(state.control_url_applied) : "Tailscale 官方服务";
   const openLogin = async value => {
     loginRequested.current = false;
     setLoginError("");
@@ -63,6 +85,38 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     } catch (e) { if (mounted.current) setError(e.message); }
     finally { inflight.current = false; if (mounted.current) setBusy(false); }
   };
+  const saveControl = async (raw, { confirm = true } = {}) => {
+    if (busy || !ready) return;
+    const next = raw.trim();
+    if (confirm && state?.enabled && normalizeControlInput(next) !== normalizeControlInput(state.control_url || "")) {
+      if (!await onConfirm({ title: "切换控制服务器？", body: "当前私网连接会断开。每个控制服务器的设备身份分别保留，切回原服务器后无需重新登录。SSH 公钥保留。", confirm: "切换" })) return;
+    }
+    setBusy(true); setError(""); setControlError(""); setNotice(""); revision.current++;
+    let needRefresh = false;
+    try {
+      inflight.current = true;
+      const value = await api("/tailscale/control-server", { control_url: next });
+      if (mounted.current) {
+        setState(value);
+        setControlInput(value.control_url || "");
+        setNotice(`已切换到 ${value.control_url ? controlOrigin(value.control_url) : "Tailscale 官方服务"}`);
+      }
+      return value;
+    } catch (e) {
+      if (!mounted.current) return;
+      const recovery = e.recovery || "";
+      if (recovery === "tailnet-control-invalid") { setControlOpen(true); setControlError(e.message); }
+      else if (recovery === "tailnet-control-pending") { setError(e.message); setNotice("可再次保存以重试"); needRefresh = true; }
+      else if (recovery === "tailnet-control-restored") { setNotice("已恢复原设置"); needRefresh = true; }
+      else if (recovery === "tailnet-control-unsupported") setError(e.message);
+      else if (recovery === "tailnet-control-unreadable") { setControlOpen(true); setControlError(e.message); }
+      else setError(e.message);
+    } finally {
+      inflight.current = false;
+      if (mounted.current) setBusy(false);
+      if (mounted.current && needRefresh) void refresh();
+    }
+  };
   const login = async () => {
     loginRequested.current = true;
     const result = await act(state?.enabled ? "login" : "connect");
@@ -78,18 +132,24 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     loginRequested.current = false;
     if (await act(logout ? "logout" : "disconnect")) { setSelected(""); setSSHOpen(false); }
   };
+  const toggleControl = () => {
+    const next = !controlOpen;
+    setControlOpen(next);
+    if (next && state?.control_url) setControlInput(state.control_url);
+  };
   return <div className="tailscale-panel">
       <div className={`tailscale-overview${connected ? " connected" : ""}`}>
         <div className="tailscale-state" role="status">
           <div className="tailscale-network-icon"><Network size={24} /></div>
-          <div><strong>{!ready ? "等待 Cage 环境就绪" : labels[state?.backend] || (state ? "连接状态待确认" : "正在读取状态…")}</strong>
+          <div><strong>{!ready ? "等待 Cage 环境就绪" : controlBlocked ? "连接状态待确认" : labels[state?.backend] || (state ? "连接状态待确认" : "正在读取状态…")}</strong>
             {connected && <span>{state.tailnet || "Tailscale 私网"}</span>}
           </div>
           <button className="icon-button" aria-label="刷新 Tailscale 状态" disabled={!ready || busy} onClick={refresh}><RefreshCw size={16} /></button>
         </div>
-        <p className="field-help">{!ready ? "启动 Cage 环境后，即可登录并连接私网。" : connected ? "Cage 已加入私网。选择设备，查看地址并使用它的服务。" : state?.backend === "NeedsLogin" && !state.auth_url ? "正在向 Tailscale 获取登录链接。若长时间没有打开浏览器，请检查环境联网后重新发起登录。" : descriptions[state?.backend] || "正在读取当前环境的 Tailscale 状态。"}</p>
+        <p className="field-help">{!ready ? "启动 Cage 环境后，即可登录并连接私网。" : controlBlocked ? "请先处理下方控制服务器状态。" : connected ? "Cage 已加入私网。选择设备，查看地址并使用它的服务。" : state?.backend === "NeedsLogin" && !state.auth_url ? (selfBuilt ? "正在向控制服务器获取登录链接。若长时间没有打开浏览器，请检查环境联网后重新发起登录。" : "正在向 Tailscale 获取登录链接。若长时间没有打开浏览器，请检查环境联网后重新发起登录。") : descriptions[state?.backend] || "正在读取当前环境的 Tailscale 状态。"}</p>
         {state?.account && connected && <p className="tailscale-account">登录账号 · {state.account}</p>}
-        {ready && state && <div className="tailscale-actions">
+        {connected && selfBuilt && <p className="tailscale-account">控制服务器 · {currentControlLabel}</p>}
+        {ready && state && !controlBlocked && <div className="tailscale-actions">
           {!state.installed ? <button className="primary-button" disabled={busy} onClick={async () => {
             setBusy(true); setError("");
             try { await onInstall(); } catch (e) { setError(e.message); }
@@ -103,13 +163,34 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
         </div>}
       </div>
       {(error || loginError && !connected) && <p className="error-message" role="alert">{error || loginError}</p>}
+      {ready && state && controlBlocked && <section className="tailscale-control-warning" role="alert">
+        {isUnsupported && <p>{selfBuilt ? "当前环境组件不支持自建控制服务器。请在设置中更新环境组件，或改用 Tailscale 官方服务。" : "当前环境组件无法切换控制服务器。请在设置中更新环境组件。"}</p>}
+        {isMismatch && <p>环境中的 Tailscale 正在使用 {appliedControlLabel}，与当前设置 {currentControlLabel} 不一致。</p>}
+        {isMismatch && <button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl(state.control_url || "", { confirm: false })}>应用当前设置</button>}
+        {isUnsupported && ["macos", "windows-11"].includes(status.guest_system) && <button className="quiet-button" disabled={busy} onClick={async () => {
+          setBusy(true); setError("");
+          try { await onInstall(); } catch (e) { setError(e.message); }
+          finally { if (mounted.current) setBusy(false); }
+        }}>更新环境组件</button>}
+      </section>}
+      {ready && state && <section className="tailscale-section" aria-label="控制服务器">
+        <button className="tailscale-disclosure" aria-expanded={controlOpen} aria-controls="tailnet-control" onClick={toggleControl}><span><Server size={16} />控制服务器</span><ChevronDown size={16} /></button>
+        {controlOpen && <div id="tailnet-control" className="tailscale-detail">
+          <p className="field-help">Cage 默认使用 Tailscale 官方服务。也可以填写自建 Headscale 控制服务器地址并保存切换。</p>
+          <p className="tailscale-control-current">当前服务器：<strong>{currentControlLabel}</strong></p>
+          <label className="field-label" htmlFor="tailscale-control-url">自建控制服务器地址</label>
+          <div className="tailscale-connect-form"><input id="tailscale-control-url" aria-label="自建控制服务器地址" type="url" placeholder="https://headscale.example.com" value={controlInput} onChange={e => { setControlInput(e.target.value); setControlError(""); }} maxLength={1024} spellCheck={false} /><button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl(controlInput)}>保存并切换</button></div>
+          {controlError && <p className="tailscale-control-error" role="alert">{controlError}</p>}
+          {selfBuilt && <button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl("")}>改用 Tailscale 官方服务</button>}
+        </div>}
+      </section>}
       {ready && state?.health?.length > 0 && <div className="tailscale-health" role="status"><strong>网络需要留意</strong>{state.health.map((message, i) => <p key={i}>{message}</p>)}</div>}
       {connected && <section className="tailscale-self" aria-label="当前 Cage 设备">
         <DeviceIcon os={state.os} />
         <div><strong>{state.hostname || state.name?.split(".")[0] || "Cage"} <span className="tailscale-badge">当前环境</span></strong><span className="tailscale-address">{address || "正在分配地址…"}{state.os ? ` · ${state.os}` : ""}</span></div>
         {address && <button className="quiet-button" onClick={() => copy(address, "已复制 Cage 私网地址")}><Copy size={14} />复制地址</button>}
       </section>}
-      <section className="tailscale-section tailscale-devices" aria-labelledby="tailscale-devices-title">
+      {!controlBlocked && <section className="tailscale-section tailscale-devices" aria-labelledby="tailscale-devices-title">
         <div className="tailscale-section-heading"><h3 id="tailscale-devices-title">网络中的设备{connected && <span>{peers.length}</span>}</h3>{connected && peers.length > 0 && <span className="field-help">{peers.filter(peer => peer.online).length} 台在线</span>}</div>
         {connected && peers.length > 0 && <label className="tailscale-search"><Search size={16} /><input aria-label="搜索设备" type="search" placeholder="搜索设备名称或地址" value={query} onChange={e => setQuery(e.target.value)} /></label>}
         {!connected ? <div className="tailscale-empty"><Monitor size={26} /><strong>连接后查看你的设备</strong><p>在浏览器完成登录，设备清单会自动出现。</p></div>
@@ -134,7 +215,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
               <p className="field-help">SSH、SFTP 与使用 OpenSSH 的工具可直接使用以上私网地址。其他应用的接入方式见下方“应用访问私网”。</p>
             </div>}
           </article>)}</div>}
-      </section>
+      </section>}
       {connected && <section className="tailscale-section">
         <button className="tailscale-disclosure" aria-expanded={sshOpen} aria-controls="tailnet-inbound-ssh" onClick={() => setSSHOpen(!sshOpen)}><span><KeyRound size={16} />从其他设备 SSH 到 Cage</span><ChevronDown size={16} /></button>
         {sshOpen && <div id="tailnet-inbound-ssh" className="tailscale-detail">
