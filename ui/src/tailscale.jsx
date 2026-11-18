@@ -17,6 +17,10 @@ const isControlOrigin = value => {
     return url.protocol === "https:" && Boolean(url.hostname) && (url.pathname === "/" || url.pathname === "") && !url.search && !url.hash;
   } catch { return false; }
 };
+const normalizeControlOrigin = value => {
+  if (!value) return value;
+  return isControlOrigin(value) ? new URL(value).origin : value;
+};
 const unreadableMessage = "Tailscale 控制服务器设置无法读取，请重新保存控制服务器。";
 
 export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, onConfirm }) {
@@ -114,7 +118,8 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   };
   const saveControl = async (raw, { confirm = true } = {}) => {
     if (busy || !ready) return;
-    const next = raw.trim();
+    const input = raw.trim();
+    const next = normalizeControlOrigin(input);
     const known = state?.installed === true && Object.prototype.hasOwnProperty.call(state, "control_url_applied");
     const applied = known ? state.control_url_applied || "" : "";
     const desired = state?.control_url || "";
@@ -135,12 +140,13 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     let needRefresh = false;
     try {
       inflight.current = true;
-      const value = await api("/tailscale/control-server", { control_url: next });
+      const value = await api("/tailscale/control-server", { control_url: input });
       if (mounted.current) {
         setState(value);
         setUnreadable("");
         setControlInput(value.control_url || "");
-        showNotice(value.installed === false ? `已保存，安装 Tailscale 后将使用 ${controlLabel(next)}` : `已切换到 ${controlLabel(next)}`, next);
+        const saved = value.control_url || "";
+        showNotice(value.installed === false ? `已保存，安装 Tailscale 后将使用 ${controlLabel(saved)}` : `已切换到 ${controlLabel(saved)}`, saved);
       }
       return value;
     } catch (e) {

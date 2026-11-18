@@ -6,6 +6,10 @@ const engine = process.env.CAGE_TEST_BROWSER || "chromium";
 const output = new URL(`../../docs/test-reports/2026-11-17-tailscale-control/${engine}/`, import.meta.url);
 await mkdir(output, { recursive: true });
 const baseTail = () => ({ installed: true, version: "1.104.5", enabled: false, backend: "Stopped", control_url: "", control_url_status: "ok", control_url_applied: "", ips: [], peers: [], keys: [], forwards: [], user: "cage", ssh_port: 22 });
+const serverControlURL = value => {
+  if (!value) return "";
+  try { return new URL(value).origin; } catch { return value; }
+};
 let tail = baseTail();
 let failControl = null;
 let failGet = null;
@@ -48,7 +52,7 @@ try {
       if (failControl) return route.fulfill({ status: failControl.status, contentType: "text/plain; charset=utf-8", headers: { "X-Cage-Recovery": failControl.recovery }, body: failControl.body });
       // Like the host, only a successful switch rewrites tailscale.json.
       failGet = null;
-      const next = body?.control_url ?? "";
+      const next = serverControlURL(body?.control_url ?? "");
       // Saving before installation only records the desired server; nothing has been applied yet.
       tail = { ...tail, control_url: next, control_url_status: "ok", control_url_applied: tail.installed === false ? "" : next };
       return route.fulfill({ json: tail });
@@ -132,15 +136,15 @@ try {
   await refresh();
   await panel.getByText("已断开", { exact: true }).waitFor();
   await panel.locator(".tailscale-control-current strong").filter({ hasText: "https://hs.example.com" }).waitFor();
-  await input.fill("https://hs.example.com");
+  await input.fill("HTTPS://HS.EXAMPLE.COM/");
   const posts = () => controlCalls.filter(call => call.action === "control-server").length;
   const postsBeforeAlready = posts();
-  assert.equal(await input.inputValue(), "https://hs.example.com");
+  assert.equal(await input.inputValue(), "HTTPS://HS.EXAMPLE.COM/");
   await panel.getByRole("button", { name: "保存并切换", exact: true }).click();
   await panel.getByText("已在使用 https://hs.example.com", { exact: true }).waitFor();
   assert.equal(await page.getByRole("dialog").count(), 0);
   assert.equal(posts(), postsBeforeAlready);
-  checks.push("already applied address shows 已在使用 without a dialog or request");
+  checks.push("case and trailing slash normalize to 已在使用 without a dialog or request");
   await input.fill("https://hs-new.example.com");
   await panel.getByRole("button", { name: "保存并切换", exact: true }).click();
   const stoppedDialog = page.getByRole("dialog", { name: "切换控制服务器？", exact: true });
@@ -299,14 +303,21 @@ try {
   tail = { ...baseTail(), enabled: false, backend: "Stopped", control_url: "", control_url_status: "ok", control_url_applied: "" };
   await refresh();
   await panel.getByText("已断开", { exact: true }).waitFor();
-  await input.fill("https://hs-target.example.com");
+  await input.fill("HTTPS://HS-TARGET.EXAMPLE.COM:443/");
   await panel.getByRole("button", { name: "保存并切换", exact: true }).click();
   const stoppedOfficialDialog = page.getByRole("dialog", { name: "切换控制服务器？", exact: true });
   await stoppedOfficialDialog.waitFor();
   assert.equal(await stoppedOfficialDialog.getByText("目前使用的是 Tailscale 官方服务，是否切换为 https://hs-target.example.com？", { exact: true }).count(), 1);
+  const polled = page.waitForResponse(async response => {
+    if (response.request().method() !== "GET" || new URL(response.url()).pathname !== "/api/tailscale") return false;
+    const body = await response.json().catch(() => null);
+    return body?.control_url === "https://hs-target.example.com";
+  });
   await stoppedOfficialDialog.getByRole("button", { name: "切换", exact: true }).click();
   await panel.getByText("已切换到 https://hs-target.example.com", { exact: true }).waitFor();
-  checks.push("stopped component on the official server names both servers in the confirmation");
+  await polled;
+  await panel.getByText("已切换到 https://hs-target.example.com", { exact: true }).waitFor({ timeout: 2000 });
+  checks.push("non-canonical input is confirmed and reported canonically, and survives the next poll");
   const legacyTail = baseTail();
   delete legacyTail.control_url_applied;
   tail = { ...legacyTail, enabled: false, backend: "Stopped", control_url: "https://legacy.example.com", control_url_status: "ok" };
