@@ -8,6 +8,7 @@ await mkdir(output, { recursive: true });
 const baseTail = () => ({ installed: true, version: "1.104.5", enabled: false, backend: "Stopped", control_url: "", control_url_status: "ok", control_url_applied: "", ips: [], peers: [], keys: [], forwards: [], user: "cage", ssh_port: 22 });
 let tail = baseTail();
 let failControl = null;
+let failGet = null;
 const controlCalls = [];
 const { browser, page, state, errors } = await createWorkbench({
   beforeNavigate: (_page, fixture) => {
@@ -36,7 +37,9 @@ try {
     const action = new URL(request.url()).pathname.split("/").at(-1);
     const body = request.postDataJSON();
     controlCalls.push({ method: request.method(), action, body });
+    if (request.method() === "GET" && failGet) return route.fulfill({ status: failGet.status, contentType: "text/plain; charset=utf-8", headers: { "X-Cage-Recovery": failGet.recovery }, body: failGet.body });
     if (action === "control-server") {
+      failGet = null;
       if (failControl) return route.fulfill({ status: failControl.status, contentType: "text/plain; charset=utf-8", headers: { "X-Cage-Recovery": failControl.recovery }, body: failControl.body });
       const next = body?.control_url ?? "";
       tail = { ...tail, control_url: next, control_url_status: "ok", control_url_applied: next };
@@ -44,6 +47,32 @@ try {
     }
     return route.fulfill({ json: tail });
   });
+  failGet = { status: 500, recovery: "tailnet-control-unreadable", body: "Tailscale 控制服务器设置无法读取，请在 Tailscale 面板重新保存控制服务器" };
+  await open.waitFor();
+  await open.click();
+  const recovery = panel.getByRole("alert", { name: "控制服务器设置无法读取", exact: true });
+  await recovery.waitFor();
+  await recovery.getByText("Tailscale 控制服务器设置无法读取，请在 Tailscale 面板重新保存控制服务器", { exact: true }).waitFor();
+  const recoveryInput = recovery.getByLabel("自建控制服务器地址", { exact: true });
+  assert.equal(await panel.getByRole("button", { name: "连接并登录", exact: true }).count(), 0);
+  assert.equal(await panel.getByRole("button", { name: "断开连接", exact: true }).count(), 0);
+  assert.equal(await panel.getByText("网络中的设备", { exact: true }).count(), 0);
+  assert.equal(await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).count(), 0);
+  assert.equal(await panel.getByRole("button", { name: "应用访问私网", exact: true }).count(), 0);
+  checks.push("first load with unreadable settings shows the recovery area instead of connection controls");
+  await recoveryInput.fill("https://hs.example.com");
+  await recovery.getByRole("button", { name: "保存并切换", exact: true }).click();
+  await panel.getByText("已切换到 https://hs.example.com", { exact: true }).waitFor();
+  assert.deepEqual(controlCalls.at(-1), { method: "POST", action: "control-server", body: { control_url: "https://hs.example.com" } });
+  await panel.getByText("已断开", { exact: true }).waitFor();
+  assert.equal(await recovery.count(), 0);
+  checks.push("saving from the recovery area posts the address, restores the panel and clears the unreadable flag");
+  failGet = { status: 500, recovery: "tailnet-control-unreadable", body: "Tailscale 控制服务器设置无法读取，请在 Tailscale 面板重新保存控制服务器" };
+  await recovery.waitFor({ timeout: 6000 });
+  await recovery.getByRole("button", { name: "改用 Tailscale 官方服务", exact: true }).click();
+  await panel.getByText("已切换到 Tailscale 官方服务", { exact: true }).waitFor();
+  assert.deepEqual(controlCalls.at(-1), { method: "POST", action: "control-server", body: { control_url: "" } });
+  checks.push("official switch in the recovery area posts an empty control_url");
   await open.waitFor();
   await open.click();
   await panel.getByText("已断开", { exact: true }).waitFor();

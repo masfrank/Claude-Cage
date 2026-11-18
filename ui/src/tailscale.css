@@ -55,6 +55,7 @@
 .tailscale-control-warning { border-left: 2px solid var(--danger); padding: 0 12px; font-size: 12px; line-height: 1.7; display: flex; flex-direction: column; gap: 10px; }
 .tailscale-control-warning p { margin: 0; overflow-wrap: anywhere; }
 .tailscale-control-warning .quiet-button { align-self: flex-start; }
+.tailscale-control-recovery { gap: 12px; padding: 14px; border: 1px solid var(--border); border-left: 2px solid var(--danger); border-radius: 8px; background: var(--hover); }
 .tailscale-control-current { color: var(--ink); font-size: 12px; margin: 0; }
 .tailscale-control-current strong { font-weight: 600; overflow-wrap: anywhere; }
 .tailscale-control-error { margin: 0; font-size: 12px; line-height: 1.6; color: var(--danger); }

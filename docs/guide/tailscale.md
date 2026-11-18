@@ -28,7 +28,7 @@ Debian 环境首次使用时需点击「安装 Tailscale」。macOS 和 Windows 
 headscale auth register --auth-id … --user …
 ```
 
-使用 OIDC 的 Headscale 直接在浏览器内完成授权，无需 CLI 注册。
+使用 OIDC 的 Headscale 预期在内置浏览器中完成登录跳转，无需 CLI 注册；当前版本未实测 OIDC 登录流程。
 
 每个控制服务器的设备身份分别保留：切换服务器只断开当前私网连接，不删除任何一方的设备身份；切回原服务器后无需重新登录。「断开连接」保留当前身份与 SSH 公钥，「退出登录」只撤销当前控制服务器上的登录。SSH 主机密钥和已添加的公钥在所有控制服务器之间共用。
 

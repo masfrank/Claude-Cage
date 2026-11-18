@@ -28,8 +28,10 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
   const [sshOpen, setSSHOpen] = useState(false), [selected, setSelected] = useState(""), [username, setUsername] = useState("");
   const [port, setPort] = useState("80"), [appsOpen, setAppsOpen] = useState(false);
   const [controlOpen, setControlOpen] = useState(false), [controlInput, setControlInput] = useState(""), [controlError, setControlError] = useState("");
+  const [unreadable, setUnreadable] = useState("");
   const mounted = useRef(true), inflight = useRef(false), loginRequested = useRef(false), revision = useRef(0);
   const ready = status.ready && !status.job?.running;
+  const settingsUnreadable = Boolean(unreadable);
   const controlStatus = state?.control_url_status ?? "ok";
   const isUnsupported = controlStatus === "unsupported";
   const isMismatch = controlStatus === "mismatch";
@@ -60,12 +62,19 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     try {
       const value = await api("/tailscale");
       if (mounted.current && current === revision.current) {
-        setState(value); setError("");
+        setState(value); setError(""); setUnreadable("");
         if (loginRequested.current && value.auth_url) await openLogin(value);
         if (value.backend === "Running") loginRequested.current = false;
       }
       return value;
-    } catch (e) { if (mounted.current && current === revision.current) setError(e.message); }
+    } catch (e) {
+      if (mounted.current && current === revision.current) {
+        if (e.recovery === "tailnet-control-unreadable") {
+          setError("");
+          setUnreadable(e.message || "Tailscale 控制服务器设置无法读取，请重新保存控制服务器。");
+        } else setError(e.message);
+      }
+    }
     finally { if (current === revision.current) inflight.current = false; }
   };
   useEffect(() => {
@@ -98,6 +107,7 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
       const value = await api("/tailscale/control-server", { control_url: next });
       if (mounted.current) {
         setState(value);
+        setUnreadable("");
         setControlInput(value.control_url || "");
         setNotice(`已切换到 ${value.control_url ? controlOrigin(value.control_url) : "Tailscale 官方服务"}`);
       }
@@ -138,6 +148,15 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
     if (next && state?.control_url) setControlInput(state.control_url);
   };
   return <div className="tailscale-panel">
+      {settingsUnreadable ? <section className="tailscale-control-warning tailscale-control-recovery" role="alert" aria-label="控制服务器设置无法读取">
+        <p><strong>{unreadable}</strong></p>
+        <p className="field-help">重新保存控制服务器地址，或改用 Tailscale 官方服务。设置恢复后，面板会自动重新加载。</p>
+        <label className="field-label" htmlFor="tailscale-control-url">自建控制服务器地址</label>
+        <div className="tailscale-connect-form"><input id="tailscale-control-url" aria-label="自建控制服务器地址" type="url" placeholder="https://headscale.example.com" value={controlInput} onChange={e => { setControlInput(e.target.value); setControlError(""); }} maxLength={1024} spellCheck={false} /><button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl(controlInput)}>保存并切换</button></div>
+        {controlError && <p className="tailscale-control-error" role="alert">{controlError}</p>}
+        {error && <p className="tailscale-control-error" role="alert">{error}</p>}
+        <button className="quiet-button" disabled={!ready || busy} onClick={() => saveControl("")}>改用 Tailscale 官方服务</button>
+      </section> : <>
       <div className={`tailscale-overview${connected ? " connected" : ""}`}>
         <div className="tailscale-state" role="status">
           <div className="tailscale-network-icon"><Network size={24} /></div>
@@ -233,5 +252,6 @@ export function TailscalePanel({ status, onOpenLogin, onOpenBrowser, onInstall, 
       </section>}
       <p className="field-help tailscale-footer">其他设备需安装 Tailscale 并加入同一网络。设备访问受网络权限控制；暂停 Cage 联网或停止环境会中断私网连接。</p>
       {notice && <p className="tailscale-notice" role="status"><Check size={14} />{notice}</p>}
+      </>}
     </div>;
 }
