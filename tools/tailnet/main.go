@@ -31,14 +31,16 @@ import (
 const version = "1.104.5"
 
 type settings struct {
-	Enabled bool     `json:"enabled"`
-	Keys    []string `json:"keys"`
+	Enabled    bool     `json:"enabled"`
+	Keys       []string `json:"keys"`
+	ControlURL string   `json:"control_url,omitempty"`
 }
 type request struct {
-	Action string `json:"action"`
-	Key    string `json:"key,omitempty"`
-	Host   string `json:"host,omitempty"`
-	Port   int    `json:"port,omitempty"`
+	Action     string  `json:"action"`
+	Key        string  `json:"key,omitempty"`
+	Host       string  `json:"host,omitempty"`
+	Port       int     `json:"port,omitempty"`
+	ControlURL *string `json:"control_url,omitempty"`
 }
 type peer struct {
 	ID       string     `json:"id,omitempty"`
@@ -50,37 +52,40 @@ type peer struct {
 	LastSeen *time.Time `json:"last_seen,omitempty"`
 }
 type state struct {
-	Installed bool           `json:"installed"`
-	Version   string         `json:"version"`
-	Enabled   bool           `json:"enabled"`
-	Backend   string         `json:"backend"`
-	URL       string         `json:"auth_url,omitempty"`
-	ReturnID  string         `json:"return_id,omitempty"`
-	Name      string         `json:"name,omitempty"`
-	Hostname  string         `json:"hostname,omitempty"`
-	OS        string         `json:"os,omitempty"`
-	Tailnet   string         `json:"tailnet,omitempty"`
-	Account   string         `json:"account,omitempty"`
-	Health    []string       `json:"health,omitempty"`
-	IPs       []string       `json:"ips"`
-	Peers     []peer         `json:"peers"`
-	Keys      []string       `json:"keys"`
-	User      string         `json:"user"`
-	SSHPort   int            `json:"ssh_port"`
-	Error     string         `json:"error,omitempty"`
-	ProxyURL  string         `json:"proxy_url,omitempty"`
-	Forwards  []forwardState `json:"forwards"`
+	Installed  bool           `json:"installed"`
+	Version    string         `json:"version"`
+	Enabled    bool           `json:"enabled"`
+	Backend    string         `json:"backend"`
+	ControlURL string         `json:"control_url"`
+	URL        string         `json:"auth_url,omitempty"`
+	ReturnID   string         `json:"return_id,omitempty"`
+	Name       string         `json:"name,omitempty"`
+	Hostname   string         `json:"hostname,omitempty"`
+	OS         string         `json:"os,omitempty"`
+	Tailnet    string         `json:"tailnet,omitempty"`
+	Account    string         `json:"account,omitempty"`
+	Health     []string       `json:"health,omitempty"`
+	IPs        []string       `json:"ips"`
+	Peers      []peer         `json:"peers"`
+	Keys       []string       `json:"keys"`
+	User       string         `json:"user"`
+	SSHPort    int            `json:"ssh_port"`
+	Error      string         `json:"error,omitempty"`
+	ProxyURL   string         `json:"proxy_url,omitempty"`
+	Forwards   []forwardState `json:"forwards"`
 }
 type node struct {
-	mu          sync.Mutex
-	dir         string
-	config      settings
-	server      *tsnet.Server
-	client      *local.Client
-	ssh         *gliderssh.Server
-	listener    net.Listener
-	connections map[net.Conn]bool
-	forwards    map[string]*tailnetForward
+	mu             sync.Mutex
+	dir            string
+	config         settings
+	server         *tsnet.Server
+	client         *local.Client
+	ssh            *gliderssh.Server
+	listener       net.Listener
+	connections    map[net.Conn]bool
+	forwards       map[string]*tailnetForward
+	startError     string
+	invalidControl bool
 }
 
 func dataDir() string {
@@ -97,7 +102,7 @@ func newNode(dir string) (*node, error) {
 	n := &node{dir: dir, connections: map[net.Conn]bool{}}
 	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
 	if err == nil {
-		err = json.Unmarshal(b, &n.config)
+		err = n.loadSettings(b)
 	}
 	if err != nil && !os.IsNotExist(err) {
 		return nil, err
@@ -114,12 +119,33 @@ func (n *node) save() error {
 }
 func (n *node) start() error {
 	if n.server != nil {
+		n.startError = ""
 		return nil
+	}
+	if n.invalidControl {
+		n.startError = invalidPersistedControlURL
+		return errors.New(n.startError)
+	}
+	dir := n.stateDir()
+	if dir != n.dir {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			n.startError = err.Error()
+			return err
+		}
+		if err := protectStateDir(dir); err != nil {
+			n.startError = err.Error()
+			return err
+		}
 	}
 	hostname, _ := os.Hostname()
 	hostname = "cage-" + strings.TrimPrefix(hostname, "cage-")
-	s := &tsnet.Server{Dir: n.dir, Hostname: hostname, UserLogf: func(string, ...any) {}}
-	return n.startServer(s)
+	s := &tsnet.Server{Dir: dir, Hostname: hostname, ControlURL: n.config.ControlURL, UserLogf: func(string, ...any) {}}
+	if err := n.startServer(s); err != nil {
+		n.startError = err.Error()
+		return err
+	}
+	n.startError = ""
+	return nil
 }
 
 func (n *node) startServer(s *tsnet.Server) error {
@@ -175,9 +201,12 @@ func (n *node) stop() {
 }
 func (n *node) snapshot(ctx context.Context) (state, error) {
 	username := currentUser()
-	out := state{Installed: true, Version: version, Enabled: n.config.Enabled, Backend: "Stopped", IPs: []string{}, Peers: []peer{}, Keys: n.config.Keys, User: username, SSHPort: 22}
+	out := state{Installed: true, Version: version, Enabled: n.config.Enabled, Backend: "Stopped", ControlURL: n.config.ControlURL, IPs: []string{}, Peers: []peer{}, Keys: n.config.Keys, User: username, SSHPort: 22}
 	if out.Keys == nil {
 		out.Keys = []string{}
+	}
+	if n.config.Enabled && n.server == nil && n.startError != "" {
+		out.Health = append([]string{"Tailscale 未能启动：" + n.startError}, out.Health...)
 	}
 	if n.client == nil {
 		return out, nil
@@ -252,8 +281,17 @@ func currentUser() string {
 func (n *node) run(ctx context.Context, r request) (state, error) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
+	if r.ControlURL != nil {
+		if err := n.useControlURL(*r.ControlURL); err != nil {
+			return state{}, err
+		}
+	}
 	switch r.Action {
 	case "status":
+	case "control-server":
+		if r.ControlURL == nil {
+			return state{}, errors.New("Tailscale 操作无效")
+		}
 	case "open-service":
 		if _, err := n.openForward(ctx, r.Host, r.Port); err != nil {
 			return state{}, err
@@ -275,6 +313,7 @@ func (n *node) run(ctx context.Context, r request) (state, error) {
 			return n.interactiveLogin(ctx)
 		}
 	case "disconnect":
+		n.startError = ""
 		n.config.Enabled = false
 		if err := n.save(); err != nil {
 			return state{}, err
@@ -282,6 +321,7 @@ func (n *node) run(ctx context.Context, r request) (state, error) {
 		n.stop()
 		_ = n.writeSSHConfig(nil)
 	case "logout":
+		n.startError = ""
 		if n.client == nil {
 			if err := n.start(); err != nil {
 				return state{}, err
@@ -531,9 +571,7 @@ func main() {
 		os.Exit(1)
 	}
 	// Never inherit a host or environment auth key. Enrollment is interactive.
-	for _, key := range []string{"TS_AUTHKEY", "TS_AUTH_KEY", "TS_CLIENT_SECRET", "TS_CLIENT_ID", "TSNET_FORCE_LOGIN"} {
-		_ = os.Unsetenv(key)
-	}
+	clearInheritedTailnetEnv()
 	lock, err := os.OpenFile(filepath.Join(n.dir, "node.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil || lockState(lock) != nil {
 		os.Exit(1)

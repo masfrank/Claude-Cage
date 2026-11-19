@@ -6,7 +6,29 @@ const engine = process.env.CAGE_TEST_BROWSER || "chromium";
 const output = new URL(`../../docs/test-reports/2026-11-09-tailscale-redesign/${engine}/`, import.meta.url);
 await mkdir(output, { recursive: true });
 let copied = "", fail = false, delayed = false, failKey = false, failService = false, failBrowser = true;
-let tail = { installed: true, version: "1.104.5", enabled: false, backend: "Stopped", ips: [], peers: [], keys: [], forwards: [], user: "cage", ssh_port: 22 };
+const fixtureIds = { AAAAFixtureLocal: "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", AAAAFixtureAnon: "SHA256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" };
+const parseFixtureKey = line => {
+  const [type, blob, ...rest] = line.trim().split(/\s+/);
+  return { id: fixtureIds[blob] || `SHA256:${blob.replace(/[^A-Za-z0-9]/g, "").padEnd(43, "0").slice(0, 43)}`, type, comment: rest.join(" "), key: line.trim() };
+};
+let keys = [], removeBodies = [], revealGate = null, revealArrived = null, revealRelease = null, revealDelivered = null;
+let removeGate = null, removeArrived = null, removeRelease = null, removeDelivered = null;
+const maskedKeys = () => keys.map(({ id, type, comment }) => ({ id, type, comment }));
+const holdNextReveal = () => {
+  const arrived = new Promise(resolve => { revealArrived = resolve; });
+  const delivered = new Promise(resolve => { revealDelivered = resolve; });
+  revealGate = new Promise(resolve => { revealRelease = resolve; });
+  return { arrived, delivered };
+};
+const releaseHeldReveal = () => { revealGate = null; revealRelease?.(); };
+const holdNextRemove = () => {
+  const arrived = new Promise(resolve => { removeArrived = resolve; });
+  const delivered = new Promise(resolve => { removeDelivered = resolve; });
+  removeGate = new Promise(resolve => { removeRelease = resolve; });
+  return { arrived, delivered };
+};
+const releaseHeldRemove = () => { removeGate = null; removeRelease?.(); };
+let tail = { installed: true, version: "1.104.5", enabled: false, backend: "Stopped", ips: [], peers: [], ssh_keys: [], forwards: [], user: "cage", ssh_port: 22 };
 const { browser, page, state, errors } = await createWorkbench({ beforeNavigate: (_page, fixture) => { fixture.status.ready = fixture.status.vm_running = true; }, nativeRequest: body => { if (body.action === "clipboardWrite") { copied = body.text; return true; } } });
 const checks = [];
 const open = page.getByRole("button", { name: "打开 Tailscale", exact: true });
@@ -16,20 +38,37 @@ try {
   await page.route("**/api/browser/new", route => failBrowser ? route.fulfill({ status: 502, body: "浏览器暂未响应" }) : route.fallback());
   await page.route("**/api/tailscale**", async route => {
     const request = route.request(), action = new URL(request.url()).pathname.split("/").at(-1), body = request.postDataJSON();
+    const respond = () => route.fulfill({ json: { ...tail, ssh_keys: maskedKeys() } });
     if (fail) return route.fulfill({ status: 502, contentType: "text/plain", body: "Tailscale 暂未响应，请稍后重试" });
     if (["connect", "login"].includes(action)) tail = { ...tail, enabled: true, backend: "NeedsLogin", ...(delayed ? {} : { auth_url: "https://login.tailscale.com/a/fixture-login" }) };
     if (["disconnect", "logout"].includes(action)) tail = { ...tail, enabled: false, backend: "Stopped", proxy_url: "", ips: [], peers: [], forwards: [], auth_url: "" };
     if (action === "add-key") {
       if (failKey) return route.fulfill({ status: 502, body: "请粘贴一条有效的 SSH 公钥" });
-      tail.keys.push(body.key);
+      const entry = parseFixtureKey(body.key);
+      keys = [...keys.filter(item => item.id !== entry.id), entry];
     }
-    if (action === "remove-key") tail.keys = tail.keys.filter(key => key !== body.key);
+    if (action === "remove-key") {
+      removeBodies.push(body);
+      const held = Boolean(removeGate);
+      if (held) { const gate = removeGate; removeGate = null; removeArrived?.(); removeArrived = null; await gate; }
+      keys = keys.filter(item => body.id ? item.id !== body.id : item.key !== body.key);
+      if (held) { removeDelivered?.(); removeDelivered = null; }
+    }
+    if (action === "reveal-key") {
+      const held = Boolean(revealGate);
+      if (held) { const gate = revealGate; revealGate = null; revealArrived?.(); revealArrived = null; await gate; }
+      const entry = keys.find(item => item.id === body.id);
+      if (!entry || body.account_password !== "correct-password") await route.fulfill({ status: 400, contentType: "text/plain; charset=utf-8", body: "密码错误" });
+      else await route.fulfill({ json: { id: entry.id, key: entry.key } });
+      if (held) { revealDelivered?.(); revealDelivered = null; }
+      return;
+    }
     if (action === "open-service") {
       if (failService) return route.fulfill({ status: 502, body: "设备未出现在当前 Tailscale 网络中" });
       assert.equal(body.host, "100.88.2.4"); assert.equal(body.port, 8080);
       tail.forwards = [{ host: body.host, port: body.port, address: "127.0.0.1:32123" }];
     }
-    return route.fulfill({ json: tail });
+    return respond();
   });
   await open.waitFor();
   const position = await open.boundingBox(), browserPosition = await page.getByRole("button", { name: "打开浏览器", exact: true }).boundingBox();
@@ -81,15 +120,210 @@ try {
   assert.equal(await panel.getByText(tail.proxy_url, { exact: true }).count(), 0);
   await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).focus(); await page.keyboard.press("Enter");
   await panel.getByRole("button", { name: "复制连接 Cage 命令" }).click(); assert.equal(copied, "ssh cage@100.88.2.3");
-  await panel.getByLabel("连接设备的 SSH 公钥", { exact: true }).fill("ssh-ed25519 AAAAFixture local");
+  checks.push("application proxy credential copied without rendering; SSH opt-in keyboard disclosure");
+  const keyRows = panel.locator(".tailscale-key-row");
+  const maskedDom = async () => `${await panel.evaluate(node => node.outerHTML)}\n${await panel.innerText()}`;
+  const password = () => panel.getByLabel("Cage 账户密码", { exact: true });
+  const keyOutput = panel.locator('output[aria-label="SSH 公钥全文"]');
+  const viewLocal = panel.getByRole("button", { name: "查看 SSH 公钥：local（aaaaaaaa）", exact: true });
+  await panel.getByLabel("连接设备的 SSH 公钥", { exact: true }).fill("ssh-ed25519 AAAAFixtureLocal local");
   failKey = true; await panel.getByRole("button", { name: "添加公钥", exact: true }).click(); await panel.getByRole("alert").waitFor();
-  assert.equal(await panel.getByLabel("连接设备的 SSH 公钥").inputValue(), "ssh-ed25519 AAAAFixture local");
-  failKey = false; await panel.getByRole("button", { name: "添加公钥", exact: true }).click(); await panel.locator(".tailscale-key").waitFor();
+  assert.equal(await panel.getByLabel("连接设备的 SSH 公钥").inputValue(), "ssh-ed25519 AAAAFixtureLocal local");
+  failKey = false; await panel.getByRole("button", { name: "添加公钥", exact: true }).click(); await keyRows.first().waitFor();
+  assert.equal(await keyRows.count(), 1);
+  assert.equal(await keyRows.first().locator(".tailscale-key-label").innerText(), "local");
+  assert.equal(await keyRows.first().locator(".tailscale-key-badge").innerText(), "已添加");
+  assert.equal(await keyRows.first().getAttribute("title"), `ssh-ed25519 · ${fixtureIds.AAAAFixtureLocal}`);
+  assert.ok(!(await maskedDom()).includes("AAAAFixture"));
+  await panel.getByLabel("连接设备的 SSH 公钥", { exact: true }).fill("ssh-ed25519 AAAAFixtureAnon");
+  await panel.getByRole("button", { name: "添加公钥", exact: true }).click(); await keyRows.nth(1).waitFor();
+  assert.equal(await keyRows.nth(1).locator(".tailscale-key-label").innerText(), "未命名公钥 · ssh-ed25519 · bbbbbbbb");
+  assert.ok(!(await maskedDom()).includes("AAAAFixture"));
   await page.reload(); await open.click(); await panel.getByText("已连接", { exact: true }).waitFor();
+  await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).click(); await keyRows.first().waitFor();
+  assert.equal(await keyRows.count(), 2);
+  assert.ok(!(await maskedDom()).includes("AAAAFixture"));
+  checks.push("key list shows comment and 已添加 badge; unnamed key uses type and short fingerprint; list and attributes stay masked after reload");
+  await viewLocal.click(); assert.equal(await viewLocal.getAttribute("aria-expanded"), "true");
+  await password().fill("wrong-password"); await panel.getByRole("button", { name: "查看公钥", exact: true }).click();
+  await panel.getByRole("alert").filter({ hasText: "密码错误" }).waitFor();
+  assert.equal(await keyOutput.count(), 0); assert.ok(!(await maskedDom()).includes("AAAAFixture"));
+  assert.equal(await password().inputValue(), "");
+  await password().fill("correct-password"); await panel.getByRole("button", { name: "查看公钥", exact: true }).click(); await keyOutput.waitFor();
+  assert.equal(await keyOutput.innerText(), "ssh-ed25519 AAAAFixtureLocal local");
+  assert.equal(await viewLocal.getAttribute("aria-expanded"), "true");
+  await panel.getByRole("button", { name: "复制", exact: true }).click(); assert.equal(copied, "ssh-ed25519 AAAAFixtureLocal local");
+  await panel.getByRole("button", { name: "隐藏", exact: true }).click();
+  await keyOutput.waitFor({ state: "hidden" }); assert.equal(await viewLocal.getAttribute("aria-expanded"), "false");
+  assert.ok(!(await maskedDom()).includes("AAAAFixture"));
+  checks.push("wrong password shows an alert without the key; correct password reveals the full line; copy matches; aria-expanded follows the inline region");
+  await viewLocal.click(); await password().fill("correct-password");
+  await panel.getByRole("button", { name: "查看公钥", exact: true }).click(); await keyOutput.waitFor();
+  await page.evaluate(() => window.dispatchEvent(new Event("blur"))); await keyOutput.waitFor({ state: "hidden" });
+  assert.equal(await password().inputValue(), "");
+  await password().fill("correct-password"); await panel.getByRole("button", { name: "查看公钥", exact: true }).click(); await keyOutput.waitFor();
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange"))); await keyOutput.waitFor({ state: "hidden" });
+  checks.push("window blur and visibilitychange clear the revealed key and the password input");
+  const viewAnon = panel.getByRole("button", { name: "查看 SSH 公钥：未命名公钥 · ssh-ed25519 · bbbbbbbb（bbbbbbbb）", exact: true });
+  await page.evaluate(() => {
+    window.__seenKeyOutputs = [];
+    new MutationObserver(() => {
+      for (const node of document.querySelectorAll('output[aria-label="SSH 公钥全文"]')) {
+        if (!window.__seenKeyOutputs.includes(node.textContent)) window.__seenKeyOutputs.push(node.textContent);
+      }
+    }).observe(document.body, { childList: true, subtree: true, characterData: true });
+  });
+  const settle = () => page.evaluate(() => new Promise(resolve => setTimeout(() => requestAnimationFrame(() => requestAnimationFrame(resolve)), 0)));
+  const ensureClosed = async () => {
+    for (const view of [viewLocal, viewAnon]) {
+      if (await view.count() && await view.getAttribute("aria-expanded") === "true") {
+        const hide = panel.getByRole("button", { name: "隐藏", exact: true });
+        if (await hide.count()) await hide.click();
+        else await panel.getByRole("button", { name: "取消", exact: true }).click();
+      }
+    }
+  };
+  let heldDelivery = null;
+  const beginHeldReveal = async () => {
+    await ensureClosed();
+    await page.evaluate(() => { window.__seenKeyOutputs = []; });
+    const { arrived, delivered } = holdNextReveal();
+    heldDelivery = delivered;
+    await viewLocal.click();
+    await password().fill("correct-password");
+    await panel.getByRole("button", { name: "查看公钥", exact: true }).click();
+    await arrived;
+  };
+  const finishHeldReveal = async () => {
+    releaseHeldReveal();
+    await heldDelivery;
+    await settle();
+  };
+  const expectNoKeyOutput = async () => {
+    assert.deepEqual(await page.evaluate(() => window.__seenKeyOutputs), []);
+    assert.equal(await page.locator('output[aria-label="SSH 公钥全文"]').count(), 0);
+    assert.ok(!(await page.evaluate(() => document.body.innerHTML)).includes("AAAAFixture"));
+  };
+  const expectNoReveal = async () => {
+    await page.waitForFunction(() => [...document.querySelectorAll('input[type="password"]')].every(input => input.value === ""));
+    await expectNoKeyOutput();
+  };
+  await beginHeldReveal();
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await finishHeldReveal(); await expectNoReveal();
+  await beginHeldReveal();
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  await finishHeldReveal(); await expectNoReveal();
+  await beginHeldReveal();
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await finishHeldReveal(); await expectNoReveal();
+  await beginHeldReveal();
   await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).click();
-  await panel.locator(".tailscale-key").waitFor();
-  await panel.getByRole("button", { name: "移除 SSH 公钥" }).click(); await panel.locator(".tailscale-key").waitFor({ state: "hidden" });
-  checks.push("application proxy credential copied without rendering; SSH opt-in keyboard disclosure; failed key keeps input; saved key survives refresh and can be revoked");
+  await finishHeldReveal(); await expectNoReveal();
+  await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).click(); await keyRows.first().waitFor();
+  await beginHeldReveal();
+  await viewLocal.click();
+  await finishHeldReveal(); await expectNoReveal();
+  await beginHeldReveal();
+  await viewAnon.click();
+  await finishHeldReveal(); await expectNoReveal();
+  await beginHeldReveal();
+  await panel.getByRole("button", { name: "断开连接", exact: true }).click();
+  await page.getByRole("dialog", { name: "断开 Tailscale？", exact: true }).getByRole("button", { name: "断开连接", exact: true }).click();
+  await panel.getByText("已断开", { exact: true }).waitFor();
+  await finishHeldReveal(); await expectNoReveal();
+  tail = { ...tail, enabled: true, backend: "Running" };
+  await refresh(); await panel.getByText("已连接", { exact: true }).waitFor();
+  await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).click(); await keyRows.first().waitFor();
+  await beginHeldReveal();
+  keys = keys.filter(item => item.id !== fixtureIds.AAAAFixtureLocal);
+  await viewLocal.waitFor({ state: "hidden" });
+  await finishHeldReveal(); await expectNoReveal();
+  keys = [parseFixtureKey("ssh-ed25519 AAAAFixtureLocal local"), ...keys];
+  await refresh(); await viewLocal.waitFor();
+  await beginHeldReveal();
+  await page.getByRole("button", { name: "工作台", exact: true }).click(); await panel.waitFor({ state: "hidden" });
+  await finishHeldReveal(); await expectNoReveal();
+  await open.click(); await panel.getByText("已连接", { exact: true }).waitFor();
+  await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).click(); await keyRows.first().waitFor();
+  checks.push("held reveal responses are discarded after blur, cancel, visibilitychange, collapsing the section, re-opening 查看 on either key, disconnect, the key disappearing on the next poll, and unmounting the panel");
+  await beginHeldReveal();
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  await viewLocal.click();
+  await password().fill("typed-after");
+  assert.equal(await panel.getByRole("button", { name: "查看公钥", exact: true }).isDisabled(), false);
+  await finishHeldReveal();
+  assert.equal(await password().inputValue(), "typed-after");
+  assert.equal(await panel.getByRole("button", { name: "查看公钥", exact: true }).isDisabled(), false);
+  await expectNoKeyOutput();
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  await beginHeldReveal();
+  await page.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await finishHeldReveal(); await expectNoReveal();
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  await viewLocal.click();
+  await password().fill("typed-after");
+  assert.equal(await panel.getByRole("button", { name: "查看公钥", exact: true }).isDisabled(), false);
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  await beginHeldReveal();
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  await viewAnon.click();
+  await password().fill("correct-password");
+  await panel.getByRole("button", { name: "查看公钥", exact: true }).click();
+  await keyOutput.waitFor();
+  assert.equal(await keyOutput.innerText(), "ssh-ed25519 AAAAFixtureAnon");
+  await finishHeldReveal();
+  assert.equal(await keyOutput.innerText(), "ssh-ed25519 AAAAFixtureAnon");
+  assert.ok(!(await page.evaluate(() => document.body.innerHTML)).includes("AAAAFixtureLocal"));
+  assert.equal(await panel.getByRole("button", { name: "隐藏", exact: true }).isDisabled(), false);
+  await panel.getByRole("button", { name: "隐藏", exact: true }).click();
+  await viewLocal.click();
+  await password().fill("correct-password");
+  assert.equal(await panel.getByRole("button", { name: "查看公钥", exact: true }).isDisabled(), false);
+  await panel.getByRole("button", { name: "取消", exact: true }).click();
+  checks.push("an invalidated reveal preserves a newly typed password and re-enables submit; blur leaves submit usable after release");
+  checks.push("a second reveal submitted while the first is held wins and is not overwritten when the stale response arrives");
+  await viewLocal.click(); await password().fill("correct-password");
+  await panel.getByRole("button", { name: "查看公钥", exact: true }).click(); await keyOutput.waitFor();
+  await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).click();
+  await panel.getByRole("button", { name: "从其他设备 SSH 到 Cage", exact: true }).click();
+  assert.equal(await keyOutput.count(), 0);
+  await viewLocal.click(); await password().fill("correct-password");
+  await panel.getByRole("button", { name: "查看公钥", exact: true }).click(); await keyOutput.waitFor();
+  keys = keys.filter(item => item.id !== fixtureIds.AAAAFixtureLocal);
+  await refresh(); await viewLocal.waitFor({ state: "hidden" });
+  assert.equal(await keyOutput.count(), 0);
+  checks.push("collapsing the SSH section and a key disappearing after refresh both clear the reveal");
+  await panel.getByLabel("连接设备的 SSH 公钥", { exact: true }).fill("ssh-ed25519 AAAAFixtureLocal local");
+  await panel.getByRole("button", { name: "添加公钥", exact: true }).click(); await viewLocal.waitFor();
+  await page.clock.install();
+  await viewLocal.click(); await password().fill("correct-password");
+  await panel.getByRole("button", { name: "查看公钥", exact: true }).click(); await keyOutput.waitFor();
+  await page.clock.fastForward(30000); await keyOutput.waitFor({ state: "hidden" });
+  await page.clock.resume();
+  checks.push("revealed key hides after 30 seconds");
+  await ensureClosed();
+  await viewLocal.click(); await password().fill("correct-password");
+  await panel.getByRole("button", { name: "查看公钥", exact: true }).click(); await keyOutput.waitFor();
+  await panel.getByRole("button", { name: "移除 SSH 公钥：未命名公钥 · ssh-ed25519 · bbbbbbbb（bbbbbbbb）", exact: true }).click();
+  await viewAnon.waitFor({ state: "hidden" });
+  assert.equal(await keyOutput.innerText(), "ssh-ed25519 AAAAFixtureLocal local");
+  assert.equal(await viewLocal.getAttribute("aria-expanded"), "true");
+  checks.push("removing another key keeps the displayed full key unchanged");
+  const heldRemove = holdNextRemove();
+  await panel.getByRole("button", { name: "移除 SSH 公钥：local（aaaaaaaa）", exact: true }).click();
+  await heldRemove.arrived;
+  assert.equal(await page.locator('output[aria-label="SSH 公钥全文"]').count(), 0);
+  assert.equal(await viewLocal.getAttribute("aria-expanded"), "false");
+  assert.ok(!(await page.evaluate(() => document.body.innerHTML)).includes("AAAAFixture"));
+  await page.evaluate(() => { window.__seenKeyOutputs = []; });
+  releaseHeldRemove();
+  await heldRemove.delivered;
+  await viewLocal.waitFor({ state: "hidden" });
+  assert.equal(await page.locator('output[aria-label="SSH 公钥全文"]').count(), 0);
+  assert.deepEqual(await page.evaluate(() => window.__seenKeyOutputs), []);
+  assert.deepEqual(removeBodies.at(-1), { id: fixtureIds.AAAAFixtureLocal });
+  checks.push("removing a displayed key hides it before the response and keeps it hidden after the list updates");
   await page.getByRole("button", { name: "工作台", exact: true }).click(); await panel.waitFor({ state: "hidden" });
   await open.click(); await panel.getByRole("button", { name: "断开连接", exact: true }).click();
   await page.getByRole("dialog", { name: "断开 Tailscale？", exact: true }).getByRole("button", { name: "取消", exact: true }).click(); assert.equal(tail.enabled, true);
