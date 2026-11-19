@@ -117,7 +117,7 @@ func AgentOperations() []AgentOperation {
 	post("mobile.pair", "Generate the same phone pairing invitation", "/api/mobile-pair", object(map[string]string{"admin": "string", "relay": "string"}))
 	add("mobile.remove", "Remove the same paired device", "DELETE", "/api/mobile-pair", object(nil))
 	get("tailscale.get", "Read guest private-network state; SSH keys appear only as ssh_keys metadata (id, type, comment). Use tailscale.reveal-key to view the full key", "/api/tailscale")
-	for _, action := range []string{"install", "connect", "login", "disconnect", "logout", "add-key", "remove-key"} {
+	for _, action := range []string{"install", "connect", "login", "disconnect", "logout", "add-key", "remove-key", "control-server"} {
 		schema := object(nil)
 		description := "Run the same Tailscale action as the workbench"
 		if action == "add-key" {
@@ -126,6 +126,9 @@ func AgentOperations() []AgentOperation {
 		if action == "remove-key" {
 			schema = object(map[string]string{"id": "string", "key": "string"})
 			description = "Run the same Tailscale action as the workbench; pass id or key, not both"
+		}
+		if action == "control-server" {
+			schema = object(map[string]string{"control_url": "string"})
 		}
 		post("tailscale."+action, description, "/api/tailscale/"+action, schema)
 	}

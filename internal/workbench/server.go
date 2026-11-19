@@ -97,6 +97,10 @@ type Server struct {
 	nativeDownloadRevision                           uint64
 	windowsNetwork                                   *windowsHostNetwork
 	op                                               sync.Mutex
+	tailnetMu                                        sync.Mutex
+	tailnetPlaceBinary                               func() error
+	tailnetApplySavedControl                         func(context.Context) error
+	tailnetInstalledProbe                            func() (bool, error)
 	profile, configPath, exe, origin, token, session string
 	mu                                               sync.Mutex
 	tailnetKeyMu                                     sync.Mutex

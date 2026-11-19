@@ -2,7 +2,6 @@ package workbench
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -11,7 +10,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 	"unicode"
 
 	"golang.org/x/crypto/ssh"
@@ -298,59 +296,12 @@ func maskTailnetState(result map[string]json.RawMessage) ([]byte, error) {
 	return masked, nil
 }
 
-func (s *Server) callTailnet(ctx context.Context, token, action, key, host string, port int) (map[string]json.RawMessage, error) {
-	body, _ := json.Marshal(struct {
-		Action string `json:"action"`
-		Key    string `json:"key,omitempty"`
-		Host   string `json:"host,omitempty"`
-		Port   int    `json:"port,omitempty"`
-	}{action, key, host, port})
-	data, err := s.guestAPI(ctx, token, http.MethodPost, "/tailnet", body)
-	if err != nil {
-		return nil, err
-	}
-	var result map[string]json.RawMessage
-	if json.Unmarshal(data, &result) != nil {
-		return nil, errInvalidTailnetState
-	}
-	return result, nil
-}
-
 func writeTailnetCallError(w http.ResponseWriter, err error) {
 	if errors.Is(err, errInvalidTailnetState) {
 		http.Error(w, errInvalidTailnetState.Error(), http.StatusBadGateway)
 		return
 	}
 	http.Error(w, "Tailscale 操作未完成。请更新环境组件后重试；原设备身份和 SSH 公钥会保留。", http.StatusBadGateway)
-}
-
-func writeTailnetGuestError(w http.ResponseWriter, result map[string]json.RawMessage) bool {
-	if b := result["tailnet_error"]; len(b) > 0 {
-		var reason string
-		_ = json.Unmarshal(b, &reason)
-		http.Error(w, scrubTailnetText(reason), http.StatusBadGateway)
-		return true
-	}
-	return false
-}
-
-func (s *Server) writeMaskedTailnetState(w http.ResponseWriter, result map[string]json.RawMessage) {
-	if writeTailnetGuestError(w, result) {
-		return
-	}
-	var authURL string
-	_ = json.Unmarshal(result["auth_url"], &authURL)
-	if authURL != "" && !validTailnetAuthURL(authURL) {
-		http.Error(w, "Tailscale 登录地址无效，请重新发起登录", http.StatusBadGateway)
-		return
-	}
-	masked, err := maskTailnetState(result)
-	if err != nil {
-		http.Error(w, errInvalidTailnetState.Error(), http.StatusBadGateway)
-		return
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_, _ = w.Write(masked)
 }
 
 func (s *Server) revealTailnetKey(w http.ResponseWriter, r *http.Request, id, password string) {
@@ -362,50 +313,38 @@ func (s *Server) revealTailnetKey(w http.ResponseWriter, r *http.Request, id, pa
 		requestError(w, err)
 		return
 	}
-	s.mu.Lock()
-	ready, token := s.ready, s.credentials.Token
-	busy := s.jobs.snapshot().Running
-	s.mu.Unlock()
-	if !ready || busy {
-		http.Error(w, "请先启动 Cage 环境，并等待当前操作完成", http.StatusConflict)
-		return
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-	result, err := s.callTailnet(ctx, token, "status", "", "", 0)
-	if err != nil {
-		writeTailnetCallError(w, err)
-		return
-	}
-	if writeTailnetGuestError(w, result) {
-		return
-	}
-	lines, err := decodeTailnetKeyLines(result)
-	if err != nil {
-		http.Error(w, errInvalidTailnetState.Error(), http.StatusBadGateway)
-		return
-	}
-	for _, line := range lines {
-		parsedID, _, _, _ := parseTailnetKeyLine(line)
-		if parsedID == id {
-			jsonReply(w, map[string]string{"id": id, "key": line})
+	s.withTailnet(w, true, func(token string) {
+		data, err := s.tailnetGuest(r.Context(), token, map[string]string{"action": "status"})
+		if err != nil {
+			writeTailnetCallError(w, err)
 			return
 		}
-	}
-	http.Error(w, "公钥不存在，请刷新后重试", http.StatusBadRequest)
+		result, err := decodeTailnetState(data)
+		if err != nil {
+			writeTailnetCallError(w, err)
+			return
+		}
+		if reason := tailnetErrorMessage(result); reason != "" {
+			http.Error(w, scrubTailnetText(reason), http.StatusBadGateway)
+			return
+		}
+		lines, err := decodeTailnetKeyLines(result)
+		if err != nil {
+			http.Error(w, errInvalidTailnetState.Error(), http.StatusBadGateway)
+			return
+		}
+		for _, line := range lines {
+			parsedID, _, _, _ := parseTailnetKeyLine(line)
+			if parsedID == id {
+				jsonReply(w, map[string]string{"id": id, "key": line})
+				return
+			}
+		}
+		http.Error(w, "公钥不存在，请刷新后重试", http.StatusBadRequest)
+	})
 }
 
-func (s *Server) removeTailnetKeyByID(w http.ResponseWriter, r *http.Request, token, id string) {
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-	result, err := s.callTailnet(ctx, token, "status", "", "", 0)
-	if err != nil {
-		writeTailnetCallError(w, err)
-		return
-	}
-	if writeTailnetGuestError(w, result) {
-		return
-	}
+func (s *Server) removeTailnetKeyByID(w http.ResponseWriter, r *http.Request, token, id, desired, class string, result map[string]json.RawMessage) {
 	lines, err := decodeTailnetKeyLines(result)
 	if err != nil {
 		http.Error(w, errInvalidTailnetState.Error(), http.StatusBadGateway)
@@ -413,17 +352,27 @@ func (s *Server) removeTailnetKeyByID(w http.ResponseWriter, r *http.Request, to
 	}
 	matches := uniqueTailnetKeyLines(matchingTailnetKeyLines(lines, id))
 	if len(matches) == 0 {
-		s.writeMaskedTailnetState(w, result)
+		s.replyTailnetState(w, result, desired)
 		return
 	}
 	var last map[string]json.RawMessage
 	for _, line := range matches {
-		last, err = s.callTailnet(ctx, token, "remove-key", line, "", 0)
+		send := map[string]any{"action": "remove-key", "key": line}
+		if class == bridgeSupported {
+			send["control_url"] = desired
+		}
+		data, err := s.tailnetGuest(r.Context(), token, send)
 		if err != nil {
 			writeTailnetCallError(w, err)
 			return
 		}
-		if writeTailnetGuestError(w, last) {
+		last, err = decodeTailnetState(data)
+		if err != nil {
+			writeTailnetCallError(w, err)
+			return
+		}
+		if reason := tailnetErrorMessage(last); reason != "" {
+			http.Error(w, scrubTailnetText(reason), http.StatusBadGateway)
 			return
 		}
 	}
@@ -436,5 +385,5 @@ func (s *Server) removeTailnetKeyByID(w http.ResponseWriter, r *http.Request, to
 		http.Error(w, "公钥未能移除，请刷新后重试", http.StatusBadGateway)
 		return
 	}
-	s.writeMaskedTailnetState(w, last)
+	s.replyTailnetState(w, last, desired)
 }

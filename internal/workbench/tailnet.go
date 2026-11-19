@@ -1,11 +1,10 @@
 package workbench
 
 import (
-	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
-	"time"
 )
 
 func validTailnetAuthURL(raw string) bool {
@@ -27,23 +26,20 @@ func (s *Server) tailnet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch action {
-	case "status", "connect", "login", "disconnect", "logout", "add-key", "remove-key", "open-service", "reveal-key":
+	case "status", "connect", "login", "disconnect", "logout", "add-key", "remove-key", "open-service", "control-server", "reveal-key":
 	default:
 		http.NotFound(w, r)
 		return
 	}
 	var input struct {
-		Key             string `json:"key"`
-		ID              string `json:"id"`
-		AccountPassword string `json:"account_password"`
-		Host            string `json:"host,omitempty"`
-		Port            int    `json:"port,omitempty"`
+		Key             string          `json:"key"`
+		ID              string          `json:"id"`
+		AccountPassword string          `json:"account_password"`
+		Host            string          `json:"host,omitempty"`
+		Port            int             `json:"port,omitempty"`
+		ControlURL      json.RawMessage `json:"control_url,omitempty"`
 	}
 	if r.Method != http.MethodGet && !readJSON(w, r, &input) {
-		return
-	}
-	if action == "reveal-key" {
-		s.revealTailnetKey(w, r, input.ID, input.AccountPassword)
 		return
 	}
 	if action == "remove-key" && (input.ID == "") == (input.Key == "") {
@@ -58,30 +54,23 @@ func (s *Server) tailnet(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请选择私网设备并填写 1–65535 之间的端口", 400)
 		return
 	}
-	s.mu.Lock()
-	ready, token := s.ready, s.credentials.Token
-	busy := s.jobs.snapshot().Running
-	s.mu.Unlock()
-	if !ready || busy {
-		http.Error(w, "请先启动 Cage 环境，并等待当前操作完成", 409)
+	if action == "control-server" {
+		next, ok := parseControlServerInput(w, input.ControlURL)
+		if !ok {
+			return
+		}
+		s.handleControlServer(w, r, next)
 		return
 	}
-	if action == "add-key" || action == "remove-key" {
-		s.tailnetKeyMu.Lock()
-		defer s.tailnetKeyMu.Unlock()
-	}
-	if action == "remove-key" && input.ID != "" {
-		s.removeTailnetKeyByID(w, r, token, input.ID)
+	if len(input.ControlURL) != 0 {
+		http.Error(w, "请求格式无效", 400)
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	defer cancel()
-	result, err := s.callTailnet(ctx, token, action, input.Key, input.Host, input.Port)
-	if err != nil {
-		writeTailnetCallError(w, err)
+	if action == "reveal-key" {
+		s.revealTailnetKey(w, r, input.ID, input.AccountPassword)
 		return
 	}
-	s.writeMaskedTailnetState(w, result)
+	s.handleTailnetAction(w, r, action, input.Key, input.ID, input.Host, input.Port)
 }
 
 var errTailnetNativeInstall = errors.New("请在设置中更新环境组件，Tailscale 随客机组件一同安装")

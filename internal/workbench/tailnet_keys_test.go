@@ -202,6 +202,7 @@ func TestTailnetKeyAllActionsMasked(t *testing.T) {
 		{"POST", "/api/tailscale/add-key", `{"key":"ignored"}`},
 		{"POST", "/api/tailscale/remove-key", `{"key":"ignored"}`},
 		{"POST", "/api/tailscale/open-service", `{"host":"100.88.2.4","port":8080}`},
+		{"POST", "/api/tailscale/control-server", `{"control_url":""}`},
 	}
 	for _, tc := range cases {
 		w := request(s, tc.method, tc.path, s.origin, tc.body, true)
